@@ -31,6 +31,10 @@ pnpm -C apps/web dev
 # Terminal 4: solver bot (set SOLVER_PRIVATE_KEY)
 export SOLVER_PRIVATE_KEY=0x...
 pnpm -C apps/solver-bot dev
+
+# Optional: run a second bot with different defaults
+export SOLVER_PRIVATE_KEY=0x...
+pnpm -C apps/solver-bot dev:bot-b
 ```
 
 Open http://localhost:3000, create a work order, and watch quotes + verification events flow through.

@@ -49,6 +49,11 @@ export type PaymentEventRecord = {
   payload: unknown;
 };
 
+export type SolverStatsRecord = {
+  solverAddress: string;
+  payload: unknown;
+};
+
 export function createDb() {
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL;');
@@ -106,6 +111,11 @@ export function createDb() {
 
     CREATE INDEX IF NOT EXISTS payment_events_work_order_idx
       ON payment_events(work_order_id);
+
+    CREATE TABLE IF NOT EXISTS solver_stats (
+      solver_address TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL
+    );
   `);
 
   const insertWorkOrderStmt = db.prepare(
@@ -153,6 +163,16 @@ export function createDb() {
   );
   const listPaymentEventsStmt = db.prepare(
     'SELECT id, work_order_id, created_at, type, payload_json FROM payment_events WHERE work_order_id = ? ORDER BY created_at ASC'
+  );
+
+  const upsertSolverStatsStmt = db.prepare(
+    'INSERT INTO solver_stats (solver_address, payload_json) VALUES (?, ?) ON CONFLICT(solver_address) DO UPDATE SET payload_json = excluded.payload_json'
+  );
+  const getSolverStatsStmt = db.prepare(
+    'SELECT solver_address, payload_json FROM solver_stats WHERE solver_address = ? LIMIT 1'
+  );
+  const listSolverStatsStmt = db.prepare(
+    'SELECT solver_address, payload_json FROM solver_stats ORDER BY solver_address ASC'
   );
 
   return {
@@ -306,6 +326,29 @@ export function createDb() {
         workOrderId: row.work_order_id,
         createdAt: row.created_at,
         type: row.type,
+        payload: JSON.parse(row.payload_json),
+      }));
+    },
+    upsertSolverStats(record: SolverStatsRecord) {
+      upsertSolverStatsStmt.run(record.solverAddress, JSON.stringify(record.payload));
+    },
+    getSolverStats(solverAddress: string): SolverStatsRecord | null {
+      const row = getSolverStatsStmt.get(solverAddress) as
+        | { solver_address: string; payload_json: string }
+        | undefined;
+      if (!row) return null;
+      return {
+        solverAddress: row.solver_address,
+        payload: JSON.parse(row.payload_json),
+      };
+    },
+    listSolverStats(): SolverStatsRecord[] {
+      const rows = listSolverStatsStmt.all() as Array<{
+        solver_address: string;
+        payload_json: string;
+      }>;
+      return rows.map((row) => ({
+        solverAddress: row.solver_address,
         payload: JSON.parse(row.payload_json),
       }));
     },

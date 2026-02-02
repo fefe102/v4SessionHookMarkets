@@ -4,6 +4,7 @@ export type WorkOrderStatus =
   | 'SELECTED'
   | 'VERIFYING'
   | 'PASSED_PENDING_CHALLENGE'
+  | 'CHALLENGED'
   | 'COMPLETED'
   | 'FAILED'
   | 'EXPIRED';
@@ -24,10 +25,19 @@ export type WorkOrder = {
     deliveryEndsAt: number | null;
     verifyEndsAt: number | null;
     challengeEndsAt: number | null;
+    patchEndsAt: number | null;
   };
   selection: {
     selectedQuoteId: string | null;
     selectedSolverId: string | null;
+    selectedAt?: number | null;
+    attemptedQuoteIds?: string[];
+  };
+  challenge: {
+    status: 'NONE' | 'OPEN' | 'REJECTED' | 'PATCH_WINDOW' | 'PATCH_PASSED' | 'PATCH_FAILED';
+    challengeId: string | null;
+    challengerAddress: string | null;
+    pendingRewardAmount: string | null;
   };
   yellow: {
     yellowSessionId: string | null;

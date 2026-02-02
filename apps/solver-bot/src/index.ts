@@ -162,6 +162,13 @@ async function runOnce() {
     if (submissions.find((s) => s.solverAddress.toLowerCase() === solverAddress.toLowerCase())) continue;
     await submitArtifact(workOrder);
   }
+
+  const challenged = await fetchJson<WorkOrder[]>(`${API_URL}/work-orders?status=CHALLENGED`);
+  for (const workOrder of challenged) {
+    if (workOrder.selection.selectedSolverId?.toLowerCase() !== solverAddress.toLowerCase()) continue;
+    if (workOrder.deadlines.patchEndsAt && Date.now() > workOrder.deadlines.patchEndsAt) continue;
+    await submitArtifact(workOrder);
+  }
 }
 
 runOnce().catch((err) => {

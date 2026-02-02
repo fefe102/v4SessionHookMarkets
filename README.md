@@ -35,6 +35,10 @@ pnpm -C apps/solver-bot dev
 
 Open http://localhost:3000, create a work order, and watch quotes + verification events flow through.
 
+Notes:
+- The API auto-selects the best quote after the bidding window closes, or you can call `POST /work-orders/:id/select`.
+- After verification passes, the challenge window opens; the API auto-settles when it expires.
+
 ## Real mode (Yellow + Base Sepolia proof)
 
 1) Copy `.env.example` to `.env` and fill:

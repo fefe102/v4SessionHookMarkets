@@ -18,6 +18,9 @@ id_rsa*
 AGENTS.md
 spec.md
 
+# Local devcontainer (keep local only)
+.devcontainer/
+
 # Local data (keep demo state out of git)
 data/
 *.sqlite

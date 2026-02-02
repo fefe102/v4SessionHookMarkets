@@ -10,6 +10,7 @@ export default function CreateWorkOrderForm() {
   const [bounty, setBounty] = useState('10');
   const [capAmountIn, setCapAmountIn] = useState('1000');
   const [allowlist, setAllowlist] = useState('0x0000000000000000000000000000000000000001,0x0000000000000000000000000000000000000002');
+  const [requesterAddress, setRequesterAddress] = useState('');
   const [status, setStatus] = useState<string | null>(null);
 
   async function handleSubmit(event: React.FormEvent) {
@@ -27,6 +28,7 @@ export default function CreateWorkOrderForm() {
         templateType,
         params,
         bounty: { currency: 'ytest.usd', amount: bounty },
+        requesterAddress: requesterAddress.trim() ? requesterAddress.trim() : undefined,
       }),
     });
 
@@ -67,6 +69,10 @@ export default function CreateWorkOrderForm() {
       <label>
         Bounty (ytest.usd)
         <input className="input" value={bounty} onChange={(e) => setBounty(e.target.value)} />
+      </label>
+      <label>
+        Requester address (optional)
+        <input className="input" value={requesterAddress} onChange={(e) => setRequesterAddress(e.target.value)} />
       </label>
       <button className="button" type="submit">Create</button>
       {status && <p>{status}</p>}

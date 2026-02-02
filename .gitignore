@@ -1,0 +1,36 @@
+# Secrets / local config (commit only sanitized *.example files)
+.env
+.env.local
+.env.*.local
+.envrc
+*.pem
+*.key
+*.p12
+*.keystore
+id_ed25519*
+id_rsa*
+
+# Logs / OS
+*.log
+.DS_Store
+
+# Local data (keep demo state out of git)
+data/
+*.sqlite
+*.sqlite3
+*.db
+events.jsonl
+events.jsonl.*
+
+# Node / Next
+node_modules/
+.pnpm-store/
+dist/
+build/
+.next/
+.turbo/
+
+# Foundry (if/when added)
+out/
+cache/
+broadcast/

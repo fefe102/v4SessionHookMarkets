@@ -103,6 +103,7 @@ function initGitRepo(repoDir: string) {
     execSync('git init', { cwd: repoDir, stdio: 'ignore' });
     execSync('git config user.email "solver@local"', { cwd: repoDir, stdio: 'ignore' });
     execSync('git config user.name "solver-bot"', { cwd: repoDir, stdio: 'ignore' });
+    execSync('git config commit.gpgsign false', { cwd: repoDir, stdio: 'ignore' });
   }
   execSync('git add .', { cwd: repoDir, stdio: 'ignore' });
   execSync('git commit -m "feat: add hook artifact" --allow-empty', { cwd: repoDir, stdio: 'ignore' });

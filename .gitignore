@@ -14,6 +14,10 @@ id_rsa*
 *.log
 .DS_Store
 
+# Local contributor specs (kept out of new clones)
+AGENTS.md
+spec.md
+
 # Local data (keep demo state out of git)
 data/
 *.sqlite
@@ -34,3 +38,4 @@ build/
 out/
 cache/
 broadcast/
+harness/v4-hook-harness/lib/

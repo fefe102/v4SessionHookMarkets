@@ -18,6 +18,7 @@ export type WorkOrder = {
   templateType: WorkOrderTemplate;
   params: Record<string, unknown>;
   bounty: { currency: string; amount: string };
+  requesterAddress?: string | null;
   bidding: { biddingEndsAt: number };
   deadlines: {
     deliveryEndsAt: number | null;
@@ -32,6 +33,9 @@ export type WorkOrder = {
     yellowSessionId: string | null;
     sessionAssetAddress: string | null;
     allowanceTotal: string | null;
+    participants?: string[];
+    allocations?: Array<{ participant: string; amount: string }>;
+    sessionVersion?: number;
   };
   milestones: {
     payoutSchedule: Array<{ key: string; percent: number }>;

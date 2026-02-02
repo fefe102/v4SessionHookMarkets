@@ -9,7 +9,12 @@
     "lint": "pnpm -r lint"
   },
   "devDependencies": {
-    "typescript": "^5.6.3",
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "@erc7824/nitrolite": "^0.5.3",
+    "viem": "^2.45.1",
+    "ws": "^8.19.0"
   }
 }

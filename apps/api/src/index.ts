@@ -21,7 +21,7 @@ import {
 } from '@v4shm/shared';
 import { createDb } from './db.js';
 import { EventBus } from './events.js';
-import { YellowClient } from '@v4shm/yellow-client';
+import { YellowClient, type YellowSessionState } from '@v4shm/yellow-client';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../');
 
@@ -60,6 +60,37 @@ function emit(workOrderId: string, type: string, payload: unknown) {
   events.emit(event);
 }
 
+function buildSessionState(workOrder: WorkOrder): YellowSessionState | null {
+  if (!workOrder.yellow.yellowSessionId || !workOrder.yellow.allowanceTotal) return null;
+  if (!workOrder.yellow.participants || !workOrder.yellow.allocations) return null;
+  if (workOrder.yellow.sessionVersion === undefined || workOrder.yellow.sessionVersion === null) return null;
+  return {
+    sessionId: workOrder.yellow.yellowSessionId,
+    allowanceTotal: workOrder.yellow.allowanceTotal,
+    participants: workOrder.yellow.participants,
+    allocations: workOrder.yellow.allocations,
+    version: workOrder.yellow.sessionVersion,
+  };
+}
+
+function applySessionState(workOrder: WorkOrder, sessionState: YellowSessionState | null) {
+  if (!sessionState) return;
+  workOrder.yellow.yellowSessionId = sessionState.sessionId;
+  workOrder.yellow.allowanceTotal = sessionState.allowanceTotal;
+  workOrder.yellow.participants = sessionState.participants;
+  workOrder.yellow.allocations = sessionState.allocations;
+  workOrder.yellow.sessionVersion = sessionState.version;
+}
+
+function persistWorkOrder(workOrder: WorkOrder) {
+  db.updateWorkOrder({
+    id: workOrder.id,
+    createdAt: workOrder.createdAt,
+    status: workOrder.status,
+    payload: workOrder,
+  });
+}
+
 function selectBestQuote(quotes: QuotePayload[]) {
   return [...quotes].sort((a, b) => {
     const priceDiff = Number(a.price) - Number(b.price);
@@ -90,6 +121,7 @@ server.post('/work-orders', async (request, reply) => {
     templateType?: WorkOrder['templateType'];
     params?: Record<string, unknown>;
     bounty?: { currency: string; amount: string | number };
+    requesterAddress?: string;
   };
 
   if (!body?.title || !body?.templateType || !body?.bounty) {
@@ -98,9 +130,22 @@ server.post('/work-orders', async (request, reply) => {
     });
   }
 
+  let requesterAddress: string | null = null;
+  if (body.requesterAddress) {
+    try {
+      requesterAddress = getAddress(body.requesterAddress);
+    } catch {
+      return reply.status(400).send({ error: 'Invalid requester address' });
+    }
+  }
+
   const now = Date.now();
   const id = randomUUID();
   const status: WorkOrder['status'] = 'BIDDING';
+  const allowanceTotal = (
+    Number(body.bounty.amount) +
+    QUOTE_REWARD * MAX_QUOTE_REWARDS
+  ).toFixed(2);
 
   const workOrder: WorkOrder = {
     id,
@@ -113,6 +158,7 @@ server.post('/work-orders', async (request, reply) => {
       currency: body.bounty.currency,
       amount: String(body.bounty.amount),
     },
+    requesterAddress,
     bidding: {
       biddingEndsAt: now + BIDDING_WINDOW_MS,
     },
@@ -128,7 +174,10 @@ server.post('/work-orders', async (request, reply) => {
     yellow: {
       yellowSessionId: null,
       sessionAssetAddress: YELLOW_ASSET.token,
-      allowanceTotal: null,
+      allowanceTotal,
+      participants: undefined,
+      allocations: undefined,
+      sessionVersion: undefined,
     },
     milestones: {
       payoutSchedule: [
@@ -147,23 +196,6 @@ server.post('/work-orders', async (request, reply) => {
       verificationReportId: null,
     },
   };
-
-  const allowanceTotal = (
-    Number(workOrder.bounty.amount) +
-    QUOTE_REWARD * MAX_QUOTE_REWARDS
-  ).toFixed(2);
-
-  try {
-    const session = await yellowClient.createSession({
-      workOrderId: workOrder.id,
-      allowanceTotal,
-    });
-    workOrder.yellow.yellowSessionId = session.sessionId;
-    workOrder.yellow.allowanceTotal = session.allowanceTotal;
-    emit(id, 'yellowSessionCreated', session);
-  } catch (error) {
-    server.log.error(error, 'failed to create Yellow session');
-  }
 
   db.insertWorkOrder({
     id,
@@ -252,12 +284,29 @@ server.post('/work-orders/:id/select', async (request, reply) => {
   workOrder.deadlines.verifyEndsAt = now + VERIFY_WINDOW_MS;
   workOrder.deadlines.challengeEndsAt = now + CHALLENGE_WINDOW_MS;
 
-  db.updateWorkOrder({
-    id: workOrder.id,
-    createdAt: workOrder.createdAt,
-    status: workOrder.status,
-    payload: workOrder,
-  });
+  if (!workOrder.yellow.yellowSessionId) {
+    const allowanceTotal = workOrder.yellow.allowanceTotal
+      ?? (
+        Number(workOrder.bounty.amount) +
+        QUOTE_REWARD * MAX_QUOTE_REWARDS
+      ).toFixed(2);
+    try {
+      const session = await yellowClient.createSession({
+        workOrderId: workOrder.id,
+        allowanceTotal,
+        solverAddress: selectedQuote.solverAddress,
+        requesterAddress: workOrder.requesterAddress ?? undefined,
+      });
+      applySessionState(workOrder, session);
+      workOrder.requesterAddress = session.participants[0] ?? workOrder.requesterAddress ?? null;
+      emit(id, 'yellowSessionCreated', session);
+    } catch (error) {
+      server.log.error(error, 'failed to create Yellow session');
+      return reply.status(500).send({ error: 'Failed to create Yellow session' });
+    }
+  }
+
+  persistWorkOrder(workOrder);
 
   emit(id, 'solverSelected', { workOrderId: id, quote: selectedQuote });
 
@@ -387,8 +436,15 @@ server.post('/work-orders/:id/submit', async (request, reply) => {
         milestoneKey: milestone.key,
         createdAt: Date.now(),
       };
-      const transfer = await yellowClient.transfer(paymentEvent);
+      const transfer = await yellowClient.transfer({
+        workOrderId: workOrder.id,
+        event: paymentEvent,
+        sessionState: buildSessionState(workOrder),
+        allowanceTotal: workOrder.yellow.allowanceTotal,
+      });
       paymentEvent.yellowTransferId = transfer.transferId;
+      applySessionState(workOrder, transfer.sessionState ?? null);
+      persistWorkOrder(workOrder);
       db.insertPaymentEvent({
         id: paymentEvent.id,
         workOrderId: workOrder.id,
@@ -435,8 +491,15 @@ server.post('/work-orders/:id/end-session', async (request, reply) => {
     milestoneKey: 'M5_NO_CHALLENGE_OR_PATCH_OK',
     createdAt: Date.now(),
   };
-  const transfer = await yellowClient.transfer(paymentEvent);
+  const transfer = await yellowClient.transfer({
+    workOrderId: workOrder.id,
+    event: paymentEvent,
+    sessionState: buildSessionState(workOrder),
+    allowanceTotal: workOrder.yellow.allowanceTotal,
+  });
   paymentEvent.yellowTransferId = transfer.transferId;
+  applySessionState(workOrder, transfer.sessionState ?? null);
+  persistWorkOrder(workOrder);
   db.insertPaymentEvent({
     id: paymentEvent.id,
     workOrderId: workOrder.id,
@@ -446,7 +509,11 @@ server.post('/work-orders/:id/end-session', async (request, reply) => {
   });
   emit(id, 'milestonePaid', paymentEvent);
 
-  const result = await yellowClient.closeSession({ workOrderId: workOrder.id });
+  const sessionState = buildSessionState(workOrder);
+  if (!sessionState) {
+    return reply.status(400).send({ error: 'Yellow session state missing' });
+  }
+  const result = await yellowClient.closeSession({ workOrderId: workOrder.id, sessionState });
   workOrder.status = 'COMPLETED';
 
   db.updateWorkOrder({
@@ -524,8 +591,15 @@ server.post('/solver/quotes', async (request, reply) => {
       yellowTransferId: null,
       createdAt: Date.now(),
     };
-    const transfer = await yellowClient.transfer(paymentEvent);
+    const transfer = await yellowClient.transfer({
+      workOrderId: workOrder.id,
+      event: paymentEvent,
+      sessionState: buildSessionState(workOrder),
+      allowanceTotal: workOrder.yellow.allowanceTotal,
+    });
     paymentEvent.yellowTransferId = transfer.transferId;
+    applySessionState(workOrder, transfer.sessionState ?? null);
+    persistWorkOrder(workOrder);
     db.insertPaymentEvent({
       id: paymentEvent.id,
       workOrderId: body.workOrderId,
@@ -615,8 +689,15 @@ server.post('/challenger/challenges', async (request, reply) => {
       milestoneKey: 'M5_NO_CHALLENGE_OR_PATCH_OK',
       createdAt: Date.now(),
     };
-    const transfer = await yellowClient.transfer(paymentEvent);
+    const transfer = await yellowClient.transfer({
+      workOrderId: workOrder.id,
+      event: paymentEvent,
+      sessionState: buildSessionState(workOrder),
+      allowanceTotal: workOrder.yellow.allowanceTotal,
+    });
     paymentEvent.yellowTransferId = transfer.transferId;
+    applySessionState(workOrder, transfer.sessionState ?? null);
+    persistWorkOrder(workOrder);
     db.insertPaymentEvent({
       id: paymentEvent.id,
       workOrderId: workOrder.id,
@@ -641,11 +722,12 @@ server.post('/challenger/challenges', async (request, reply) => {
 
 server.get('/work-orders/:id/ws', { websocket: true }, (connection, request) => {
   const { id } = request.params as { id: string };
+  const socket = (connection as any).socket ?? connection;
   const unsubscribe = events.subscribe(id, (event) => {
-    connection.socket.send(JSON.stringify(event));
+    socket.send(JSON.stringify(event));
   });
 
-  connection.socket.on('close', () => {
+  socket.on('close', () => {
     unsubscribe();
   });
 });

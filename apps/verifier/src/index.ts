@@ -9,8 +9,8 @@ server.get('/health', async () => ({ ok: true, mode }));
 
 server.post('/verify', async (request, reply) => {
   const body = request.body as {
-    workOrder: { id: string };
-    submission: { id: string; artifact: { artifactHash: string } };
+    workOrder: any;
+    submission: any;
   };
 
   if (!body?.workOrder?.id || !body?.submission?.id) {
@@ -18,9 +18,8 @@ server.post('/verify', async (request, reply) => {
   }
 
   const result = await runVerification({
-    workOrderId: body.workOrder.id,
-    submissionId: body.submission.id,
-    artifactHash: body.submission.artifact.artifactHash,
+    workOrder: body.workOrder,
+    submission: body.submission,
     mode,
   });
 

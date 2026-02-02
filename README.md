@@ -11,7 +11,7 @@ Verifiable work market for Uniswap v4 hook modules. Requesters post HookSpecs wi
 - `packages/shared`: Shared types + EIP-712 signing helpers.
 - `packages/yellow-client`: Yellow client wrapper (mock by default).
 - `packages/uniswap-client`: v4 proof helpers (mock by default).
-- `harness/v4-hook-harness`: Foundry scaffold.
+- `harness/v4-hook-harness`: Foundry harness + onchain proof script.
 - `data/`: Local DB + receipts (ignored).
 
 ## Quick start (local demo)
@@ -35,9 +35,25 @@ pnpm -C apps/solver-bot dev
 
 Open http://localhost:3000, create a work order, and watch quotes + verification events flow through.
 
-## Env config
+## Real mode (Yellow + Base Sepolia proof)
 
-Copy `.env.example` to `.env` and fill in keys. The repo ships in mock mode for Yellow + verifier; switch to real mode once you wire in the onchain harness.
+1) Copy `.env.example` to `.env` and fill:
+- `YELLOW_MODE=real` + Yellow RPC/WS + requester key
+- `VERIFIER_MODE=real` + `V4_RPC_URL` + verifier key
+- `V4_POOL_MANAGER` for Base Sepolia (default already set)
+
+2) Install harness deps once:
+
+```bash
+cd harness/v4-hook-harness
+forge install uniswap/v4-core --no-commit
+git -C lib/v4-core submodule update --init --recursive
+```
+
+3) Run verifier + API as usual. The verifier will:
+- `forge build` + `forge test`
+- broadcast `script/V4Proof.s.sol` to Base Sepolia
+- capture txids + proof JSON
 
 ## Notes
 

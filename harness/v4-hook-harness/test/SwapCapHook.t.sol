@@ -6,12 +6,14 @@ import {SwapCapHook} from "../src/SwapCapHook.sol";
 
 contract SwapCapHookTest is Test {
     function testAllowsUnderCap() public {
-        SwapCapHook hook = new SwapCapHook(1000);
-        assertTrue(hook.canSwap(500));
+        uint256 cap = vm.envOr("CAP_AMOUNT_IN", uint256(1000));
+        SwapCapHook hook = new SwapCapHook(cap);
+        assertTrue(hook.canSwap(cap / 2));
     }
 
     function testRejectsOverCap() public {
-        SwapCapHook hook = new SwapCapHook(1000);
-        assertFalse(hook.canSwap(1500));
+        uint256 cap = vm.envOr("CAP_AMOUNT_IN", uint256(1000));
+        SwapCapHook hook = new SwapCapHook(cap);
+        assertFalse(hook.canSwap(cap + 1));
     }
 }

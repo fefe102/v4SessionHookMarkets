@@ -56,6 +56,8 @@ export type SolverStatsRecord = {
 
 export function createDb() {
   const db = new DatabaseSync(dbPath);
+  // Helps during `tsx watch` restarts when an older process still holds the DB briefly.
+  db.exec('PRAGMA busy_timeout = 5000;');
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
 

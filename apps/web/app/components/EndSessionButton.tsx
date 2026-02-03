@@ -19,7 +19,9 @@ export default function EndSessionButton({ workOrderId }: { workOrderId: string 
       return;
     }
 
-    setStatus('Session settled');
+    const json = (await res.json()) as any;
+    const txid = String(json?.settlement?.settlementTxId ?? '');
+    setStatus(txid ? `Session settled (tx: ${txid})` : 'Session settled');
   }
 
   return (

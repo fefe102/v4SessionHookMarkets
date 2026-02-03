@@ -8,7 +8,7 @@ import type { SubmissionPayload, VerificationReport, WorkOrder } from '@v4shm/sh
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../');
 const dataDir = process.env.V4SHM_DATA_DIR
-  ? path.resolve(process.env.V4SHM_DATA_DIR)
+  ? path.resolve(repoRoot, process.env.V4SHM_DATA_DIR)
   : path.join(repoRoot, 'data');
 
 const reportsDir = path.join(dataDir, 'reports');
@@ -29,6 +29,28 @@ function runCommand(cmd: string, args: string[], cwd: string, env: NodeJS.Proces
     return { ok: false, output, error: result.error as Error };
   }
   return { ok: result.status === 0, output };
+}
+
+function resolveForgeBin(env: NodeJS.ProcessEnv): string {
+  const explicit = env.FORGE_BIN;
+  if (explicit && fs.existsSync(explicit)) return explicit;
+
+  const foundryBin = env.FOUNDRY_BIN;
+  if (foundryBin) {
+    const candidate = path.join(foundryBin, 'forge');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  const home = env.HOME ?? process.env.HOME;
+  const candidates = [
+    home ? path.join(home, '.foundry', 'bin', 'forge') : null,
+    home ? path.join(home, '.config', '.foundry', 'bin', 'forge') : null,
+  ].filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return 'forge';
 }
 
 function resolveArtifactPath(repoUrl: string): string {
@@ -119,7 +141,7 @@ export async function runVerification(input: {
       logs: {
         buildLog: '',
         testLog: '',
-        verifierStdout: 'Missing v4-core dependency. Run `forge install uniswap/v4-core --no-commit` and init submodules.',
+        verifierStdout: 'Missing v4-core dependency. Run `forge install --no-git uniswap/v4-core` and init submodules.',
       },
       proof: {
         chainId: Number(process.env.V4_CHAIN_ID ?? 84532),
@@ -165,7 +187,8 @@ export async function runVerification(input: {
     txIds: [] as string[],
   };
 
-  const build = runCommand('forge', ['build'], harnessDir, envBase);
+  const forgeBin = resolveForgeBin(envBase);
+  const build = runCommand(forgeBin, ['build'], harnessDir, envBase);
   buildLog = build.output;
   if (!build.ok) {
     const report: VerificationReport = {
@@ -190,7 +213,7 @@ export async function runVerification(input: {
   milestonesPassed.push('M1_COMPILE_OK');
 
   const testPath = templateType === 'SWAP_CAP_HOOK' ? 'test/SwapCapHook.t.sol' : 'test/WhitelistHook.t.sol';
-  const test = runCommand('forge', ['test', '--match-path', testPath], harnessDir, envBase);
+  const test = runCommand(forgeBin, ['test', '--match-path', testPath], harnessDir, envBase);
   testLog = test.output;
   if (!test.ok) {
     const report: VerificationReport = {
@@ -238,16 +261,19 @@ export async function runVerification(input: {
     return { report, milestonesPassed };
   }
 
-  const proofOut = path.join(runDir, 'proof.json');
+  // Foundry restricts vm.writeFile to paths within the project directory.
+  // Keep proof output inside the copied harness folder for each run.
+  const proofOut = path.join(harnessDir, 'proof.json');
   const scriptEnv: NodeJS.ProcessEnv = {
     ...envBase,
     POOL_MANAGER: poolManager,
     TEMPLATE_TYPE: templateType,
-    PROOF_OUT: proofOut,
+    // Keep PROOF_OUT relative so Foundry's vm.writeFile sandbox permits it.
+    PROOF_OUT: 'proof.json',
   };
 
   const script = runCommand(
-    'forge',
+    forgeBin,
     [
       'script',
       'script/V4Proof.s.sol:V4Proof',
@@ -283,17 +309,20 @@ export async function runVerification(input: {
     return { report, milestonesPassed };
   }
 
+  // With `forge script --json`, stdout is often multiple JSON objects separated by newlines.
+  // The most reliable source of tx hashes is the broadcast artifact that Foundry writes.
   let txIds: string[] = [];
   try {
-    const raw = script.output.trim();
-    const jsonStart = raw.indexOf('{');
-    const jsonEnd = raw.lastIndexOf('}');
-    const jsonString = jsonStart >= 0 ? raw.slice(jsonStart, jsonEnd + 1) : raw;
-    const parsed = JSON.parse(jsonString);
-    const transactions = parsed.transactions ?? parsed.receipts ?? [];
-    txIds = transactions
-      .map((tx: any) => tx.hash ?? tx.transactionHash)
-      .filter((hash: string | undefined) => !!hash);
+    const chainId = Number(process.env.V4_CHAIN_ID ?? 84532);
+    const broadcastPath = path.join(harnessDir, 'broadcast', 'V4Proof.s.sol', String(chainId), 'run-latest.json');
+    const fallbackPath = path.join(harnessDir, 'broadcast', 'V4Proof.s.sol', String(chainId), 'dry-run', 'run-latest.json');
+    const runPath = fs.existsSync(broadcastPath) ? broadcastPath : fallbackPath;
+    if (fs.existsSync(runPath)) {
+      const parsed = JSON.parse(fs.readFileSync(runPath, 'utf8'));
+      txIds = (parsed.transactions ?? parsed.receipts ?? [])
+        .map((tx: any) => tx.hash ?? tx.transactionHash)
+        .filter((hash: string | undefined) => !!hash);
+    }
   } catch {
     txIds = [];
   }

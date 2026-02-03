@@ -13,13 +13,9 @@ import {PoolModifyLiquidityTest} from "v4-core/src/test/PoolModifyLiquidityTest.
 import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {SwapCapHook} from "../src/SwapCapHook.sol";
 import {WhitelistHook} from "../src/WhitelistHook.sol";
-import {SwapCapHookAdapter} from "../src/SwapCapHookAdapter.sol";
-import {WhitelistHookAdapter} from "../src/WhitelistHookAdapter.sol";
+import {SwapCapHookAdapter, ISwapCapHook} from "../src/SwapCapHookAdapter.sol";
+import {WhitelistHookAdapter, IWhitelistHook} from "../src/WhitelistHookAdapter.sol";
 import {MockERC20} from "solmate/test/utils/mocks/MockERC20.sol";
-
-interface ICreate2Deployer {
-    function deploy(bytes32 salt, bytes calldata code) external returns (address deployed);
-}
 
 library HookMinerLite {
     function compute(address deployer, bytes32 salt, bytes32 initCodeHash) internal pure returns (address) {
@@ -74,23 +70,50 @@ contract V4Proof is Script {
         if (keccak256(bytes(template)) == keccak256(bytes("SWAP_CAP_HOOK"))) {
             SwapCapHook module = new SwapCapHook(capAmount);
             bytes memory args = abi.encode(manager, module);
-            (hookAddress, salt) = HookMinerLite.find(
-                CREATE2_DEPLOYER,
-                flags,
-                type(SwapCapHookAdapter).creationCode,
-                args
-            );
-            ICreate2Deployer(CREATE2_DEPLOYER).deploy(salt, abi.encodePacked(type(SwapCapHookAdapter).creationCode, args));
+            bytes32 initCodeHash = keccak256(abi.encodePacked(type(SwapCapHookAdapter).creationCode, args));
+            for (uint256 i = 0; i < 160_444; i++) {
+                bytes32 candidateSalt = bytes32(i);
+                address candidate = HookMinerLite.compute(CREATE2_DEPLOYER, candidateSalt, initCodeHash);
+                if ((uint160(candidate) & Hooks.ALL_HOOK_MASK) != flags) continue;
+                if (candidate.code.length != 0) continue;
+                hookAddress = candidate;
+                salt = candidateSalt;
+                break;
+            }
+            if (hookAddress == address(0)) revert("HookMiner: no salt");
+
+            bytes memory initCode = abi.encodePacked(type(SwapCapHookAdapter).creationCode, abi.encode(manager, ISwapCapHook(address(module))));
+            (bool ok, bytes memory ret) = CREATE2_DEPLOYER.call(abi.encodePacked(salt, initCode));
+            require(ok, "CREATE2 deploy failed");
+            require(hookAddress.code.length != 0, "Hook not deployed");
+            if (ret.length == 20) {
+                require(address(bytes20(ret)) == hookAddress, "Hook address mismatch");
+            }
         } else {
             WhitelistHook module = new WhitelistHook(allowA, allowB);
             bytes memory args = abi.encode(manager, module);
-            (hookAddress, salt) = HookMinerLite.find(
-                CREATE2_DEPLOYER,
-                flags,
+            bytes32 initCodeHash = keccak256(abi.encodePacked(type(WhitelistHookAdapter).creationCode, args));
+            for (uint256 i = 0; i < 160_444; i++) {
+                bytes32 candidateSalt = bytes32(i);
+                address candidate = HookMinerLite.compute(CREATE2_DEPLOYER, candidateSalt, initCodeHash);
+                if ((uint160(candidate) & Hooks.ALL_HOOK_MASK) != flags) continue;
+                if (candidate.code.length != 0) continue;
+                hookAddress = candidate;
+                salt = candidateSalt;
+                break;
+            }
+            if (hookAddress == address(0)) revert("HookMiner: no salt");
+
+            bytes memory initCode = abi.encodePacked(
                 type(WhitelistHookAdapter).creationCode,
-                args
+                abi.encode(manager, IWhitelistHook(address(module)))
             );
-            ICreate2Deployer(CREATE2_DEPLOYER).deploy(salt, abi.encodePacked(type(WhitelistHookAdapter).creationCode, args));
+            (bool ok, bytes memory ret) = CREATE2_DEPLOYER.call(abi.encodePacked(salt, initCode));
+            require(ok, "CREATE2 deploy failed");
+            require(hookAddress.code.length != 0, "Hook not deployed");
+            if (ret.length == 20) {
+                require(address(bytes20(ret)) == hookAddress, "Hook address mismatch");
+            }
         }
 
         PoolModifyLiquidityTest modifyLiquidity = new PoolModifyLiquidityTest(manager);
@@ -118,18 +141,30 @@ contract V4Proof is Script {
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(0);
         manager.initialize(key, sqrtPriceX96);
 
+        int24 tickLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
+        int24 tickUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
         IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
-            tickLower: TickMath.MIN_TICK,
-            tickUpper: TickMath.MAX_TICK,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
             liquidityDelta: int128(1e18),
             salt: bytes32(0)
         });
         modifyLiquidity.modifyLiquidity(key, params, bytes(""));
 
         uint160 sqrtPriceLimitX96 = TickMath.getSqrtPriceAtTick(TickMath.MIN_TICK + 1);
+        bool isSwapCap = keccak256(bytes(template)) == keccak256(bytes("SWAP_CAP_HOOK"));
+        uint256 amountIn = 1e18;
+        if (isSwapCap) {
+            // Treat capAmount as the same units used in PoolManager swaps (token base units).
+            // Swap with an amount that is guaranteed <= capAmount.
+            if (capAmount == 0) revert("CAP_AMOUNT_IN=0");
+            amountIn = capAmount / 2;
+            if (amountIn == 0) amountIn = capAmount;
+        }
         IPoolManager.SwapParams memory swapParams = IPoolManager.SwapParams({
             zeroForOne: true,
-            amountSpecified: int256(1e18),
+            // Negative = exact input in v4-core test helpers.
+            amountSpecified: -int256(amountIn),
             sqrtPriceLimitX96: sqrtPriceLimitX96
         });
         PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});

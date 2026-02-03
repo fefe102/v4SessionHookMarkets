@@ -6,7 +6,8 @@
     "dev": "pnpm -C apps/api dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "fund:sepolia": "tsx scripts/fund-base-sepolia.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

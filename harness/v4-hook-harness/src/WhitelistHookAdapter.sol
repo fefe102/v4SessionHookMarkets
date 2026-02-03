@@ -44,10 +44,17 @@ contract WhitelistHookAdapter {
         address sender,
         PoolKey calldata,
         IPoolManager.SwapParams calldata,
-        bytes calldata
+        bytes calldata hookData
     ) external view returns (bytes4, BeforeSwapDelta, uint24) {
         require(msg.sender == address(manager), "ONLY_MANAGER");
-        require(module.canSwap(sender), "NOT_ALLOWLISTED");
+        // The v4 `sender` is the immediate caller of PoolManager.swap (often a router),
+        // not necessarily the end user. For the demo harness we pass the intended trader
+        // address via hookData as `abi.encode(address)`.
+        address trader = sender;
+        if (hookData.length == 32) {
+            trader = abi.decode(hookData, (address));
+        }
+        require(module.canSwap(trader), "NOT_ALLOWLISTED");
         return (WhitelistHookAdapter.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 }

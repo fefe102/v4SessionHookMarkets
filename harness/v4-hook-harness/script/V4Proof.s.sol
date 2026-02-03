@@ -168,7 +168,12 @@ contract V4Proof is Script {
             sqrtPriceLimitX96: sqrtPriceLimitX96
         });
         PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        swapTest.swap(key, swapParams, settings, bytes(""));
+        bytes memory hookData = bytes("");
+        if (!isSwapCap) {
+            // See WhitelistHookAdapter: we pass the intended trader via hookData.
+            hookData = abi.encode(allowA);
+        }
+        swapTest.swap(key, swapParams, settings, hookData);
 
         PoolId poolId = PoolIdLibrary.toId(key);
 

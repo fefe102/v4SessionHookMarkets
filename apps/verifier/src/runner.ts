@@ -33,6 +33,69 @@ function runCommand(cmd: string, args: string[], cwd: string, env: NodeJS.Proces
   return { ok: result.status === 0, output };
 }
 
+type VerifierSandboxMode = 'host' | 'docker';
+
+function verifierSandbox(): VerifierSandboxMode {
+  return (process.env.VERIFIER_SANDBOX ?? 'host') === 'docker' ? 'docker' : 'host';
+}
+
+function dockerAvailable(): boolean {
+  const result = spawnSync('docker', ['version'], { encoding: 'utf8' });
+  return result.status === 0;
+}
+
+function runForge(
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  options?: { network?: 'none' | 'default' }
+): CommandResult {
+  if (verifierSandbox() !== 'docker') {
+    const forgeBin = resolveForgeBin(env);
+    return runCommand(forgeBin, args, cwd, env);
+  }
+
+  if (!dockerAvailable()) {
+    return { ok: false, output: 'docker not found (VERIFIER_SANDBOX=docker)', error: new Error('docker not found') };
+  }
+
+  const image = process.env.VERIFIER_DOCKER_IMAGE ?? 'ghcr.io/foundry-rs/foundry:latest';
+  const dockerArgs: string[] = ['run', '--rm', '-v', `${cwd}:/work`, '-w', '/work'];
+  if (options?.network === 'none') {
+    dockerArgs.push('--network', 'none');
+  }
+
+  // Make sure generated artifacts are readable on the host.
+  if (typeof process.getuid === 'function' && typeof process.getgid === 'function') {
+    dockerArgs.push('--user', `${process.getuid()}:${process.getgid()}`);
+  }
+
+  // Only pass the small set of env vars the harness needs. Secrets are injected only
+  // for the onchain steps (rpc/private-key are passed as forge args, not env vars).
+  const passEnvKeys = [
+    'CAP_AMOUNT_IN',
+    'ALLOWLIST_A',
+    'ALLOWLIST_B',
+    'TEMPLATE_TYPE',
+    'POOL_MANAGER',
+    'PROOF_OUT',
+    'PROOF_IN',
+    'V4_FEE',
+    'V4_TICK_SPACING',
+    'V4_AGENT_STEPS',
+    'CHALLENGE_AMOUNT_IN',
+    'CHALLENGE_TRADER',
+  ];
+  for (const key of passEnvKeys) {
+    const value = env[key];
+    if (value === undefined) continue;
+    dockerArgs.push('-e', `${key}=${value}`);
+  }
+
+  dockerArgs.push(image, 'forge', ...args);
+  return runCommand('docker', dockerArgs, cwd, env);
+}
+
 function resolveForgeBin(env: NodeJS.ProcessEnv): string {
   const explicit = env.FORGE_BIN;
   if (explicit && fs.existsSync(explicit)) return explicit;
@@ -62,7 +125,13 @@ function resolveArtifactPath(repoDir: string): string {
     path.join(repoDir, 'WhitelistHook.sol'),
   ];
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
+    if (!fs.existsSync(candidate)) continue;
+    const stat = fs.lstatSync(candidate);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Hook artifact must not be a symlink: ${candidate}`);
+    }
+    if (!stat.isFile()) continue;
+    return candidate;
   }
   throw new Error('Hook artifact not found at repoUrl');
 }
@@ -236,8 +305,7 @@ export async function runVerification(input: {
     txIds: [] as string[],
   };
 
-  const forgeBin = resolveForgeBin(envBase);
-  const build = runCommand(forgeBin, ['build'], harnessDir, envBase);
+  const build = runForge(['build'], harnessDir, envBase, { network: 'none' });
   buildLog = build.output;
   if (!build.ok) {
     const report: VerificationReport = {
@@ -262,7 +330,7 @@ export async function runVerification(input: {
   milestonesPassed.push('M1_COMPILE_OK');
 
   const testPath = templateType === 'SWAP_CAP_HOOK' ? 'test/SwapCapHook.t.sol' : 'test/WhitelistHook.t.sol';
-  const test = runCommand(forgeBin, ['test', '--match-path', testPath], harnessDir, envBase);
+  const test = runForge(['test', '--match-path', testPath], harnessDir, envBase, { network: 'none' });
   testLog = test.output;
   if (!test.ok) {
     const report: VerificationReport = {
@@ -321,8 +389,7 @@ export async function runVerification(input: {
     PROOF_OUT: 'proof.json',
   };
 
-  const script = runCommand(
-    forgeBin,
+  const scriptResult = runForge(
     [
       'script',
       'script/V4Proof.s.sol:V4Proof',
@@ -334,10 +401,11 @@ export async function runVerification(input: {
       '--json',
     ],
     harnessDir,
-    scriptEnv
+    scriptEnv,
+    { network: 'default' }
   );
-  verifierStdout = script.output;
-  if (!script.ok) {
+  verifierStdout = scriptResult.output;
+  if (!scriptResult.ok) {
     const report: VerificationReport = {
       id: randomUUID(),
       submissionId: input.submission.id,
@@ -396,8 +464,7 @@ export async function runVerification(input: {
   // This is expected to revert; if it succeeds, the submission violates the HookSpec.
   let negativeTx: string | null = null;
   try {
-    const negative = runCommand(
-      forgeBin,
+    const negative = runForge(
       [
         'script',
         'script/V4NegativeProof.s.sol:V4NegativeProof',
@@ -409,7 +476,8 @@ export async function runVerification(input: {
         '--json',
       ],
       harnessDir,
-      { ...scriptEnv, PROOF_IN: 'proof.json' }
+      { ...scriptEnv, PROOF_IN: 'proof.json' },
+      { network: 'default' }
     );
 
     const chainId = Number(process.env.V4_CHAIN_ID ?? 84532);
@@ -549,14 +617,13 @@ export async function runChallenge(input: {
     CHALLENGE_TRADER: String(challengeTrader),
   };
 
-  const forgeBin = resolveForgeBin(envBase);
-  const build = runCommand(forgeBin, ['build'], harnessDir, envBase);
+  const build = runForge(['build'], harnessDir, envBase, { network: 'none' });
   if (!build.ok) {
     throw new Error(`forge build failed for challenge: ${build.output}`);
   }
 
   // If this test fails, the challenger found a real spec violation for the provided reproduction input.
-  const test = runCommand(forgeBin, ['test', '--match-path', 'test/Challenge.t.sol'], harnessDir, envBase);
+  const test = runForge(['test', '--match-path', 'test/Challenge.t.sol'], harnessDir, envBase, { network: 'none' });
   const outcome = test.ok ? 'REJECTED' : 'SUCCESS';
   return { outcome } as const;
 }

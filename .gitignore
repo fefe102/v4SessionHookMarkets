@@ -37,8 +37,12 @@ build/
 .next/
 .turbo/
 
+# Occasionally, tooling can emit JS alongside TS sources during local runs.
+packages/**/src/*.js
+
 # Foundry (if/when added)
 out/
 cache/
 broadcast/
 harness/v4-hook-harness/lib/
+harness/v4-hook-harness/proof.json

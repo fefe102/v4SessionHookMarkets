@@ -29,12 +29,10 @@ pnpm -C apps/api dev
 pnpm -C apps/web dev
 
 # Terminal 4: solver bot (set SOLVER_PRIVATE_KEY)
-export SOLVER_PRIVATE_KEY=0x...
-pnpm -C apps/solver-bot dev
+SOLVER_PRIVATE_KEY=0x... pnpm -C apps/solver-bot dev
 
-# Optional: run a second bot with different defaults
-export SOLVER_PRIVATE_KEY=0x...
-pnpm -C apps/solver-bot dev:bot-b
+# Optional: run a second solver bot (different key + price)
+SOLVER_PRIVATE_KEY=0x... SOLVER_PRICE=9 SOLVER_ETA_MINUTES=12 pnpm -C apps/solver-bot dev
 ```
 
 Open http://localhost:3000, create a work order, and watch quotes + verification events flow through.
@@ -50,7 +48,15 @@ Notes:
 - `VERIFIER_MODE=real` + `V4_RPC_URL` + verifier key
 - `V4_POOL_MANAGER` for Base Sepolia (default already set)
 
-2) Install harness deps once:
+2) Fund the requester on Yellow sandbox (offchain ledger, not ERC20):
+
+```bash
+curl -sS -X POST https://clearnet-sandbox.yellow.com/faucet/requestTokens \
+  -H 'content-type: application/json' \
+  -d '{"userAddress":"0xYOUR_REQUESTER_ADDRESS"}'
+```
+
+3) Install harness deps once:
 
 ```bash
 cd harness/v4-hook-harness
@@ -58,7 +64,9 @@ forge install --no-git uniswap/v4-core
 git -C lib/v4-core submodule update --init --recursive
 ```
 
-3) Run verifier + API as usual. The verifier will:
+4) Ensure the verifier key has Base Sepolia ETH for gas. (Optional helper: `pnpm fund:sepolia`.)
+
+5) Run verifier + API as usual. The verifier will:
 - `forge build` + `forge test`
 - broadcast `script/V4Proof.s.sol` to Base Sepolia
 - capture txids + proof JSON

@@ -71,24 +71,34 @@ function ensureRepoDir(workOrderId: string) {
 }
 
 function writeHookTemplate(workOrder: WorkOrder, repoDir: string) {
+  // These are deliberately minimal hook modules that match the harness tests.
   const hookBody = workOrder.templateType === 'SWAP_CAP_HOOK'
-    ? `// SwapCapHook (mock)
+    ? `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
+
 contract SwapCapHook {
-  uint256 public capAmountIn = ${Number(workOrder.params?.capAmountIn ?? 1000)};
+  uint256 public capAmountIn;
+
+  constructor(uint256 _capAmountIn) {
+    capAmountIn = _capAmountIn;
+  }
+
   function canSwap(uint256 amountIn) external view returns (bool) {
     return amountIn <= capAmountIn;
   }
 }
 `
-    : `// WhitelistHook (mock)
+    : `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
+
 contract WhitelistHook {
   mapping(address => bool) public allowed;
+
   constructor(address a, address b) {
     allowed[a] = true;
     allowed[b] = true;
   }
+
   function canSwap(address trader) external view returns (bool) {
     return allowed[trader];
   }

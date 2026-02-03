@@ -2,6 +2,10 @@
   "name": "@v4shm/yellow-client",
   "private": true,
   "type": "module",
+  "main": "./dist/yellow-client/src/index.js",
+  "exports": {
+    ".": "./dist/yellow-client/src/index.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "echo 'no lint configured'",

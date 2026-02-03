@@ -156,6 +156,7 @@ export class YellowClient {
   private chainId = 84532;
   private channelId?: Hex;
   private currentAllowanceUnits?: bigint;
+  private allowanceMultiplier = 1;
   private custodyAddress?: Address;
   private adjudicatorAddress?: Address;
 
@@ -184,10 +185,20 @@ export class YellowClient {
         return await fn();
       } catch (err) {
         const message = String((err as any)?.message ?? err);
-        if (attempt === 0 && message.toLowerCase().includes('authentication required')) {
-          // The Yellow sandbox sometimes requires re-auth after WS reconnects.
-          this.resetSessionAuth();
-          continue;
+        if (attempt === 0) {
+          const lower = message.toLowerCase();
+          if (lower.includes('authentication required')) {
+            // The Yellow sandbox sometimes requires re-auth after WS reconnects.
+            this.resetSessionAuth();
+            continue;
+          }
+          if (lower.includes('insufficient session key allowance')) {
+            // We reuse a single session key across many demo flows. If it runs out of allowance,
+            // increase the allowance and re-auth (requires sufficient funds on the Yellow ledger).
+            this.allowanceMultiplier = Math.min(this.allowanceMultiplier * 2, 1024);
+            this.resetSessionAuth();
+            continue;
+          }
         }
         throw err;
       }
@@ -239,7 +250,13 @@ export class YellowClient {
       this.adjudicatorAddress = (network.adjudicator_address ?? network.adjudicatorAddress) as Address;
     }
 
-    const requestedUnits = toUnits(allowanceTotal, this.assetDecimals);
+    const configuredAllowanceTotal = process.env.YELLOW_ALLOWANCE_TOTAL;
+    const effectiveAllowanceTotal = configuredAllowanceTotal
+      ?? (this.allowanceMultiplier > 1
+        ? (Number(allowanceTotal) * this.allowanceMultiplier).toFixed(2)
+        : allowanceTotal);
+
+    const requestedUnits = toUnits(effectiveAllowanceTotal, this.assetDecimals);
     if (this.sessionSigner && this.currentAllowanceUnits && requestedUnits <= this.currentAllowanceUnits && this.authSigner) {
       return;
     }
@@ -265,7 +282,7 @@ export class YellowClient {
       allowances: [
         {
           asset,
-          amount: allowanceTotal,
+          amount: effectiveAllowanceTotal,
         },
       ],
       expires_at: expiresAt,
@@ -293,7 +310,7 @@ export class YellowClient {
         allowances: [
           {
             asset,
-            amount: allowanceTotal,
+            amount: effectiveAllowanceTotal,
           },
         ],
       },

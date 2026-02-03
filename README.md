@@ -54,7 +54,7 @@ Notes:
 
 ```bash
 cd harness/v4-hook-harness
-forge install uniswap/v4-core --no-commit
+forge install --no-git uniswap/v4-core
 git -C lib/v4-core submodule update --init --recursive
 ```
 

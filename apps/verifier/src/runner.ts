@@ -3,8 +3,10 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createPublicClient, http, type Hex } from 'viem';
+import { baseSepolia } from 'viem/chains';
 import { runMockV4Proof } from '@v4shm/uniswap-client';
-import type { SubmissionPayload, VerificationReport, WorkOrder } from '@v4shm/shared';
+import type { ChallengePayload, SubmissionPayload, VerificationReport, WorkOrder } from '@v4shm/shared';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../');
 const dataDir = process.env.V4SHM_DATA_DIR
@@ -53,16 +55,58 @@ function resolveForgeBin(env: NodeJS.ProcessEnv): string {
   return 'forge';
 }
 
-function resolveArtifactPath(repoUrl: string): string {
+function resolveArtifactPath(repoDir: string): string {
   const candidates = [
-    path.join(repoUrl, 'Hook.sol'),
-    path.join(repoUrl, 'SwapCapHook.sol'),
-    path.join(repoUrl, 'WhitelistHook.sol'),
+    path.join(repoDir, 'Hook.sol'),
+    path.join(repoDir, 'SwapCapHook.sol'),
+    path.join(repoDir, 'WhitelistHook.sol'),
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
   }
   throw new Error('Hook artifact not found at repoUrl');
+}
+
+function isRemoteRepoUrl(repoUrl: string) {
+  const trimmed = repoUrl.trim();
+  return (
+    trimmed.startsWith('http://')
+    || trimmed.startsWith('https://')
+    || trimmed.startsWith('ssh://')
+    || trimmed.startsWith('git@')
+  );
+}
+
+function ensureCleanDir(dir: string) {
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function checkoutGitCommit(input: { repoUrl: string; commitSha: string }, destDir: string) {
+  ensureCleanDir(destDir);
+
+  if (!isRemoteRepoUrl(input.repoUrl)) {
+    if (!fs.existsSync(input.repoUrl)) {
+      throw new Error(`Artifact repo path does not exist: ${input.repoUrl}`);
+    }
+    fs.cpSync(input.repoUrl, destDir, { recursive: true });
+  } else {
+    const init = spawnSync('git', ['init'], { cwd: destDir, encoding: 'utf8' });
+    if (init.status !== 0) throw new Error(`git init failed: ${(init.stderr ?? init.stdout ?? '').trim()}`);
+    const addRemote = spawnSync('git', ['remote', 'add', 'origin', input.repoUrl], { cwd: destDir, encoding: 'utf8' });
+    if (addRemote.status !== 0) throw new Error(`git remote add failed: ${(addRemote.stderr ?? addRemote.stdout ?? '').trim()}`);
+    const fetch = spawnSync('git', ['fetch', '--depth', '1', 'origin', input.commitSha], { cwd: destDir, encoding: 'utf8' });
+    if (fetch.status !== 0) throw new Error(`git fetch failed: ${(fetch.stderr ?? fetch.stdout ?? '').trim()}`);
+  }
+
+  // Always checkout in the copied repo so we don't mutate the solver's working directory.
+  if (fs.existsSync(path.join(destDir, '.git'))) {
+    const checkout = spawnSync('git', ['checkout', '--detach', input.commitSha], { cwd: destDir, encoding: 'utf8' });
+    if (checkout.status !== 0) {
+      const out = `${checkout.stdout ?? ''}${checkout.stderr ?? ''}`.trim();
+      throw new Error(`git checkout failed: ${out}`);
+    }
+  }
 }
 
 function writeReport(report: VerificationReport) {
@@ -118,13 +162,18 @@ export async function runVerification(input: {
   const runId = `${input.workOrder.id}_${input.submission.id}`;
   const runDir = path.join(runsDir, runId);
   const harnessDir = path.join(runDir, 'harness');
+  const artifactDir = path.join(runDir, 'artifact');
   fs.mkdirSync(runDir, { recursive: true });
   if (!fs.existsSync(harnessDir)) {
     fs.cpSync(harnessRoot, harnessDir, { recursive: true });
   }
 
   const templateType = input.workOrder.templateType;
-  const artifactPath = resolveArtifactPath(input.submission.artifact.repoUrl);
+  checkoutGitCommit(
+    { repoUrl: input.submission.artifact.repoUrl, commitSha: input.submission.artifact.commitSha },
+    artifactDir
+  );
+  const artifactPath = resolveArtifactPath(artifactDir);
   const hookDest = path.join(
     harnessDir,
     'src',
@@ -343,6 +392,75 @@ export async function runVerification(input: {
     proof.txIds = txIds;
   }
 
+  // Negative swap proof: broadcast a revert tx to demonstrate hook enforcement onchain.
+  // This is expected to revert; if it succeeds, the submission violates the HookSpec.
+  let negativeTx: string | null = null;
+  try {
+    const negative = runCommand(
+      forgeBin,
+      [
+        'script',
+        'script/V4NegativeProof.s.sol:V4NegativeProof',
+        '--broadcast',
+        '--rpc-url',
+        rpcUrl,
+        '--private-key',
+        privateKey,
+        '--json',
+      ],
+      harnessDir,
+      { ...scriptEnv, PROOF_IN: 'proof.json' }
+    );
+
+    const chainId = Number(process.env.V4_CHAIN_ID ?? 84532);
+    const broadcastPath = path.join(harnessDir, 'broadcast', 'V4NegativeProof.s.sol', String(chainId), 'run-latest.json');
+    const fallbackPath = path.join(harnessDir, 'broadcast', 'V4NegativeProof.s.sol', String(chainId), 'dry-run', 'run-latest.json');
+    const runPath = fs.existsSync(broadcastPath) ? broadcastPath : fallbackPath;
+    if (fs.existsSync(runPath)) {
+      const parsed = JSON.parse(fs.readFileSync(runPath, 'utf8'));
+      const hashes: string[] = (parsed.transactions ?? parsed.receipts ?? [])
+        .map((tx: any) => tx.hash ?? tx.transactionHash)
+        .filter((hash: string | undefined) => !!hash);
+      negativeTx = hashes.at(-1) ?? null;
+    }
+
+    if (!negativeTx) {
+      throw new Error(`Unable to locate negative swap tx hash. forge ok=${negative.ok}`);
+    }
+
+    const publicClient = createPublicClient({
+      chain: baseSepolia,
+      transport: http(rpcUrl),
+    });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: negativeTx as Hex });
+    if (receipt.status !== 'reverted') {
+      throw new Error(`Negative swap tx did not revert (status=${receipt.status})`);
+    }
+
+    txIds.push(negativeTx);
+    proof.txIds = txIds;
+  } catch (err) {
+    const message = String((err as any)?.message ?? err);
+    const report: VerificationReport = {
+      id: randomUUID(),
+      submissionId: input.submission.id,
+      status: 'FAIL',
+      logs: {
+        buildLog,
+        testLog,
+        verifierStdout: `${verifierStdout}\nnegativeProofError: ${message}`.trim(),
+      },
+      proof,
+      metrics: {
+        latencySeconds: Math.max(1, Math.floor((Date.now() - startedAt) / 1000)),
+      },
+      producedAt: Date.now(),
+      artifactHash: input.submission.artifact.artifactHash,
+    };
+    writeReport(report);
+    return { report, milestonesPassed };
+  }
+
   milestonesPassed.push('M3_DEPLOY_OK', 'M4_V4_POOL_PROOF_OK');
 
   const report: VerificationReport = {
@@ -367,7 +485,78 @@ export async function runVerification(input: {
   return { report, milestonesPassed };
 }
 
-export async function runChallenge(input: { mode: 'mock' | 'real' }) {
-  const outcome = process.env.V4SHM_CHALLENGE_OUTCOME ?? 'REJECTED';
-  return { outcome: outcome === 'SUCCESS' ? 'SUCCESS' : 'REJECTED' } as const;
+export async function runChallenge(input: {
+  mode: 'mock' | 'real';
+  workOrder: WorkOrder;
+  submission: SubmissionPayload;
+  challenge: ChallengePayload;
+}) {
+  if (input.mode === 'mock') {
+    const outcome = process.env.V4SHM_CHALLENGE_OUTCOME ?? 'REJECTED';
+    return { outcome: outcome === 'SUCCESS' ? 'SUCCESS' : 'REJECTED' } as const;
+  }
+
+  const runId = `${input.workOrder.id}_${input.submission.id}_${input.challenge.id}`;
+  const runDir = path.join(runsDir, `challenge_${runId}`);
+  const harnessDir = path.join(runDir, 'harness');
+  const artifactDir = path.join(runDir, 'artifact');
+  fs.mkdirSync(runDir, { recursive: true });
+  if (!fs.existsSync(harnessDir)) {
+    fs.cpSync(harnessRoot, harnessDir, { recursive: true });
+  }
+
+  checkoutGitCommit(
+    { repoUrl: input.submission.artifact.repoUrl, commitSha: input.submission.artifact.commitSha },
+    artifactDir
+  );
+  const artifactPath = resolveArtifactPath(artifactDir);
+
+  const templateType = input.workOrder.templateType;
+  const hookDest = path.join(
+    harnessDir,
+    'src',
+    templateType === 'SWAP_CAP_HOOK' ? 'SwapCapHook.sol' : 'WhitelistHook.sol'
+  );
+  fs.copyFileSync(artifactPath, hookDest);
+
+  const v4CorePath = path.join(harnessDir, 'lib', 'v4-core');
+  if (!fs.existsSync(v4CorePath)) {
+    throw new Error('Missing v4-core dependency. Run `forge install --no-git uniswap/v4-core` and init submodules.');
+  }
+
+  const repro = (input.challenge.reproductionSpec ?? {}) as Record<string, unknown>;
+  const capAmountIn = String(input.workOrder.params?.capAmountIn ?? 1000);
+  const allowlist = (input.workOrder.params?.allowlist as string[] | undefined) ?? [];
+
+  let challengeAmountIn = repro.amountIn;
+  if (typeof challengeAmountIn !== 'string' && typeof challengeAmountIn !== 'number') {
+    const cap = Number(capAmountIn);
+    challengeAmountIn = Number.isFinite(cap) ? cap + 1 : 1001;
+  }
+
+  let challengeTrader = repro.trader;
+  if (typeof challengeTrader !== 'string') {
+    challengeTrader = '0x0000000000000000000000000000000000000003';
+  }
+
+  const envBase: NodeJS.ProcessEnv = {
+    ...process.env,
+    TEMPLATE_TYPE: templateType,
+    CAP_AMOUNT_IN: capAmountIn,
+    ALLOWLIST_A: String(allowlist[0] ?? '0x0000000000000000000000000000000000000001'),
+    ALLOWLIST_B: String(allowlist[1] ?? '0x0000000000000000000000000000000000000002'),
+    CHALLENGE_AMOUNT_IN: String(challengeAmountIn),
+    CHALLENGE_TRADER: String(challengeTrader),
+  };
+
+  const forgeBin = resolveForgeBin(envBase);
+  const build = runCommand(forgeBin, ['build'], harnessDir, envBase);
+  if (!build.ok) {
+    throw new Error(`forge build failed for challenge: ${build.output}`);
+  }
+
+  // If this test fails, the challenger found a real spec violation for the provided reproduction input.
+  const test = runCommand(forgeBin, ['test', '--match-path', 'test/Challenge.t.sol'], harnessDir, envBase);
+  const outcome = test.ok ? 'REJECTED' : 'SUCCESS';
+  return { outcome } as const;
 }

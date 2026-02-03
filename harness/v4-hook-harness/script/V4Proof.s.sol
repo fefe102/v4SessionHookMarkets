@@ -183,6 +183,7 @@ contract V4Proof is Script {
             "\"hookAddress\":\"", vm.toString(hookAddress), "\",",
             "\"tokenAAddress\":\"", vm.toString(address(tokenA)), "\",",
             "\"tokenBAddress\":\"", vm.toString(address(tokenB)), "\",",
+            "\"swapTestAddress\":\"", vm.toString(address(swapTest)), "\",",
             "\"poolKey\":{",
             "\"currency0\":\"", vm.toString(Currency.unwrap(key.currency0)), "\",",
             "\"currency1\":\"", vm.toString(Currency.unwrap(key.currency1)), "\",",

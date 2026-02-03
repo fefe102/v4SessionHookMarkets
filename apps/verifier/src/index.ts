@@ -27,7 +27,22 @@ server.post('/verify', async (request, reply) => {
 });
 
 server.post('/challenge', async (_request, reply) => {
-  const result = await runChallenge({ mode });
+  const body = (_request as any).body as {
+    workOrder: any;
+    submission: any;
+    challenge: any;
+  };
+
+  if (!body?.workOrder?.id || !body?.submission?.id || !body?.challenge?.id) {
+    return reply.status(400).send({ error: 'Missing work order, submission, or challenge' });
+  }
+
+  const result = await runChallenge({
+    mode,
+    workOrder: body.workOrder,
+    submission: body.submission,
+    challenge: body.challenge,
+  });
   return reply.status(200).send(result);
 });
 

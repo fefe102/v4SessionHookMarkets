@@ -36,7 +36,9 @@ const MAX_QUOTE_REWARDS = 20;
 const AUTO_TICK_MS = 5 * 1000;
 
 const VERIFIER_URL = process.env.VERIFIER_URL ?? 'http://localhost:3002';
-const EVENT_LOG_PATH = process.env.V4SHM_EVENT_LOG ?? path.join(repoRoot, 'data', 'events.jsonl');
+const EVENT_LOG_PATH = process.env.V4SHM_EVENT_LOG
+  ? path.resolve(repoRoot, process.env.V4SHM_EVENT_LOG)
+  : path.join(repoRoot, 'data', 'events.jsonl');
 const API_URL = process.env.API_URL ?? 'http://localhost:3001';
 
 const yellowMode = process.env.YELLOW_MODE === 'real' ? 'real' : 'mock';
@@ -118,7 +120,13 @@ function selectBestQuote(quotes: QuotePayload[]) {
 }
 
 function selectNextQuote(quotes: QuotePayload[], attempted: string[]) {
-  const filtered = quotes.filter((quote) => !attempted.includes(quote.id));
+  const attemptedSolvers = new Set<string>();
+  for (const attemptedId of attempted) {
+    const quote = quotes.find((q) => q.id === attemptedId);
+    if (quote) attemptedSolvers.add(quote.solverAddress.toLowerCase());
+  }
+
+  const filtered = quotes.filter((quote) => !attemptedSolvers.has(quote.solverAddress.toLowerCase()));
   if (filtered.length === 0) return null;
   return selectBestQuote(filtered);
 }
@@ -169,6 +177,7 @@ async function ensureYellowSession(workOrder: WorkOrder, solverAddress: string) 
   const session = await yellowClient.createSession({
     workOrderId: workOrder.id,
     allowanceTotal,
+    allocationTotal: String(workOrder.bounty.amount),
     solverAddress,
     requesterAddress: workOrder.requesterAddress ?? undefined,
   });
@@ -1014,8 +1023,17 @@ async function sweepWorkOrders() {
   }
 }
 
+let sweeping = false;
 setInterval(() => {
-  sweepWorkOrders().catch((err) => server.log.error(err, 'auto sweep failed'));
+  // Prevent overlapping sweeps (the real Yellow WS path can take >AUTO_TICK_MS).
+  // Overlaps can spam the Yellow RPC and make timeouts much more likely.
+  if (sweeping) return;
+  sweeping = true;
+  sweepWorkOrders()
+    .catch((err) => server.log.error(err, 'auto sweep failed'))
+    .finally(() => {
+      sweeping = false;
+    });
 }, AUTO_TICK_MS);
 
 const port = Number(process.env.PORT ?? 3001);

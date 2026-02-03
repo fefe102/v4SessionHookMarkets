@@ -4,6 +4,7 @@ import { signChallenge, signQuote, sha256Hex, WorkOrder, QuotePayload, Submissio
 
 const API_URL = process.env.API_URL ?? 'http://localhost:3001';
 const PRIVATE_KEY = process.env.CHALLENGER_PRIVATE_KEY;
+const BOT_POLL_MS = Number(process.env.BOT_POLL_MS ?? 0);
 
 if (!PRIVATE_KEY) {
   console.error('Missing CHALLENGER_PRIVATE_KEY');
@@ -27,10 +28,17 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 async function runOnce() {
   // Join work-order sessions during bidding so we can receive challenge rewards inside the same Yellow app session.
   const bidding = await fetchJson<WorkOrder[]>(`${API_URL}/solver/work-orders?status=BIDDING`);
   for (const workOrder of bidding) {
+    const existing = await fetchJson<QuotePayload[]>(`${API_URL}/work-orders/${workOrder.id}/quotes`);
+    if (existing.some((q) => q.solverAddress.toLowerCase() === challengerAddress.toLowerCase())) continue;
+
     const quoteMessage = {
       workOrderId: workOrder.id,
       price: String(workOrder.bounty.amount),
@@ -61,6 +69,7 @@ async function runOnce() {
 
   const pending = await fetchJson<WorkOrder[]>(`${API_URL}/work-orders?status=PASSED_PENDING_CHALLENGE`);
   for (const workOrder of pending) {
+    if (workOrder.challenge?.status !== 'OPEN') continue;
     const submissions = await fetchJson<SubmissionPayload[]>(`${API_URL}/work-orders/${workOrder.id}/submissions`);
     if (!submissions.length) continue;
     const submission = submissions[submissions.length - 1];
@@ -92,7 +101,24 @@ async function runOnce() {
   }
 }
 
-runOnce().catch((err) => {
+async function main() {
+  if (Number.isFinite(BOT_POLL_MS) && BOT_POLL_MS > 0) {
+    console.log(`challenger-bot: polling every ${BOT_POLL_MS}ms as ${challengerAddress}`);
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        await runOnce();
+      } catch (err) {
+        console.error('challenger-bot loop error', err);
+      }
+      await sleep(BOT_POLL_MS);
+    }
+  }
+
+  await runOnce();
+}
+
+main().catch((err) => {
   console.error(err);
   process.exit(1);
 });

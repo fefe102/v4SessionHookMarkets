@@ -16,6 +16,7 @@ const API_URL = process.env.API_URL ?? 'http://localhost:3001';
 const PRIVATE_KEY = process.env.SOLVER_PRIVATE_KEY;
 const SOLVER_PRICE = process.env.SOLVER_PRICE ?? '10';
 const SOLVER_ETA = Number(process.env.SOLVER_ETA_MINUTES ?? 15);
+const BOT_POLL_MS = Number(process.env.BOT_POLL_MS ?? 0);
 
 if (!PRIVATE_KEY) {
   console.error('Missing SOLVER_PRIVATE_KEY');
@@ -38,7 +39,17 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 async function submitQuote(workOrder: WorkOrder) {
+  // Avoid spamming duplicate quotes when running in poll mode.
+  const existing = await fetchJson<QuotePayload[]>(`${API_URL}/work-orders/${workOrder.id}/quotes`);
+  if (existing.some((q) => q.solverAddress.toLowerCase() === solverAddress.toLowerCase())) {
+    return;
+  }
+
   const quoteMessage = {
     workOrderId: workOrder.id,
     price: SOLVER_PRICE,
@@ -181,7 +192,24 @@ async function runOnce() {
   }
 }
 
-runOnce().catch((err) => {
+async function main() {
+  if (Number.isFinite(BOT_POLL_MS) && BOT_POLL_MS > 0) {
+    console.log(`solver-bot: polling every ${BOT_POLL_MS}ms as ${solverAddress}`);
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        await runOnce();
+      } catch (err) {
+        console.error('solver-bot loop error', err);
+      }
+      await sleep(BOT_POLL_MS);
+    }
+  }
+
+  await runOnce();
+}
+
+main().catch((err) => {
   console.error(err);
   process.exit(1);
 });

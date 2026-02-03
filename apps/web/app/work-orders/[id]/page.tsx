@@ -83,6 +83,7 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
           <p>Selected solver: {workOrder.selection.selectedSolverId ?? 'n/a'}</p>
           <p>Selected at: {workOrder.selection.selectedAt ? new Date(workOrder.selection.selectedAt).toLocaleTimeString() : 'n/a'}</p>
           <p>Yellow session: {workOrder.yellow.yellowSessionId ?? 'n/a'}</p>
+          <p>Settlement: {workOrder.yellow.settlementTxId ?? 'n/a'}</p>
         </div>
       </section>
 

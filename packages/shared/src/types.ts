@@ -46,6 +46,7 @@ export type WorkOrder = {
     participants?: string[];
     allocations?: Array<{ participant: string; amount: string }>;
     sessionVersion?: number;
+    settlementTxId?: string | null;
   };
   milestones: {
     payoutSchedule: Array<{ key: string; percent: number }>;

@@ -4,7 +4,7 @@ import websocket from '@fastify/websocket';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getAddress } from 'ethers';
+import { getAddress, Wallet } from 'ethers';
 import {
   QuoteMessage,
   SubmissionMessage,
@@ -347,6 +347,7 @@ async function settleWorkOrder(workOrder: WorkOrder) {
   const sessionState = buildSessionState(workOrder);
   if (!sessionState) return null;
   const result = await yellowClient.closeSession({ workOrderId: workOrder.id, sessionState });
+  workOrder.yellow.settlementTxId = result.settlementTxId;
   workOrder.status = 'COMPLETED';
   persistWorkOrder(workOrder);
   emit(workOrder.id, 'workOrderCompleted', { settlement: result });
@@ -398,6 +399,48 @@ async function finalizeChallengeFailure(workOrder: WorkOrder) {
 }
 
 server.get('/health', async () => ({ ok: true }));
+
+server.get('/config', async () => {
+  const chainId = Number(process.env.V4_CHAIN_ID ?? YELLOW_ASSET.chainId ?? 84532);
+
+  let requesterAddress: string | null = null;
+  if (process.env.YELLOW_REQUESTER_ADDRESS) {
+    try {
+      requesterAddress = getAddress(process.env.YELLOW_REQUESTER_ADDRESS);
+    } catch {
+      requesterAddress = null;
+    }
+  } else if (process.env.YELLOW_PRIVATE_KEY) {
+    try {
+      requesterAddress = new Wallet(process.env.YELLOW_PRIVATE_KEY).address;
+    } catch {
+      requesterAddress = null;
+    }
+  }
+
+  let verifierAddress: string | null = null;
+  if (process.env.V4_PRIVATE_KEY) {
+    try {
+      verifierAddress = new Wallet(process.env.V4_PRIVATE_KEY).address;
+    } catch {
+      verifierAddress = null;
+    }
+  }
+
+  return {
+    chainId,
+    yellow: {
+      mode: yellowMode,
+      asset: YELLOW_ASSET,
+      requesterAddress,
+      enableChannels: process.env.YELLOW_ENABLE_CHANNELS === 'true',
+    },
+    verifier: {
+      chainId,
+      address: verifierAddress,
+    },
+  };
+});
 
 server.get('/work-orders', async (request) => {
   const { status } = request.query as { status?: string };

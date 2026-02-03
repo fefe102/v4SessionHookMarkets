@@ -9,6 +9,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {PoolModifyLiquidityTest} from "v4-core/src/test/PoolModifyLiquidityTest.sol";
 import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {SwapCapHook} from "../src/SwapCapHook.sol";
@@ -52,6 +53,7 @@ contract V4Proof is Script {
         address allowB = vm.envOr("ALLOWLIST_B", address(0x0000000000000000000000000000000000000002));
         uint24 fee = uint24(vm.envOr("V4_FEE", uint256(3000)));
         int24 tickSpacing = int24(int256(vm.envOr("V4_TICK_SPACING", uint256(60))));
+        uint256 agentSteps = uint256(vm.envOr("V4_AGENT_STEPS", uint256(5)));
         string memory proofOut = vm.envString("PROOF_OUT");
 
         vm.startBroadcast();
@@ -177,6 +179,34 @@ contract V4Proof is Script {
 
         PoolId poolId = PoolIdLibrary.toId(key);
 
+        // Evaluation agent loop: perform deterministic actions on the live pool and
+        // choose a direction based on onchain state (tick sign).
+        for (uint256 i = 0; i < agentSteps; i++) {
+            (, int24 tick,,) = StateLibrary.getSlot0(manager, poolId);
+            bool stepZeroForOne = tick >= 0;
+            uint160 stepSqrtPriceLimitX96 = stepZeroForOne
+                ? TickMath.getSqrtPriceAtTick(TickMath.MIN_TICK + 1)
+                : TickMath.getSqrtPriceAtTick(TickMath.MAX_TICK - 1);
+
+            IPoolManager.SwapParams memory stepSwapParams = IPoolManager.SwapParams({
+                zeroForOne: stepZeroForOne,
+                amountSpecified: -int256(amountIn),
+                sqrtPriceLimitX96: stepSqrtPriceLimitX96
+            });
+            swapTest.swap(key, stepSwapParams, settings, hookData);
+
+            // Conditional action: if the pool has moved into positive ticks, top up liquidity once.
+            if (i == agentSteps - 1 && tick > 0) {
+                IPoolManager.ModifyLiquidityParams memory topUp = IPoolManager.ModifyLiquidityParams({
+                    tickLower: tickLower,
+                    tickUpper: tickUpper,
+                    liquidityDelta: int128(1e17),
+                    salt: bytes32(0)
+                });
+                modifyLiquidity.modifyLiquidity(key, topUp, bytes(""));
+            }
+        }
+
         string memory json = string.concat(
             "{",
             "\"chainId\":", vm.toString(block.chainid), ",",
@@ -184,6 +214,7 @@ contract V4Proof is Script {
             "\"tokenAAddress\":\"", vm.toString(address(tokenA)), "\",",
             "\"tokenBAddress\":\"", vm.toString(address(tokenB)), "\",",
             "\"swapTestAddress\":\"", vm.toString(address(swapTest)), "\",",
+            "\"agentSteps\":", vm.toString(agentSteps), ",",
             "\"poolKey\":{",
             "\"currency0\":\"", vm.toString(Currency.unwrap(key.currency0)), "\",",
             "\"currency1\":\"", vm.toString(Currency.unwrap(key.currency1)), "\",",

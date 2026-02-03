@@ -15,7 +15,7 @@ import {SwapCapHook} from "../src/SwapCapHook.sol";
 import {WhitelistHook} from "../src/WhitelistHook.sol";
 import {SwapCapHookAdapter} from "../src/SwapCapHookAdapter.sol";
 import {WhitelistHookAdapter} from "../src/WhitelistHookAdapter.sol";
-import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {MockERC20} from "solmate/test/utils/mocks/MockERC20.sol";
 
 interface ICreate2Deployer {
     function deploy(bytes32 salt, bytes calldata code) external returns (address deployed);
@@ -46,7 +46,7 @@ library HookMinerLite {
 }
 
 contract V4Proof is Script {
-    address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920ca78fbf26c0b4956c;
+    address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
     function run() external {
         address managerAddress = vm.envAddress("POOL_MANAGER");
@@ -70,10 +70,11 @@ contract V4Proof is Script {
 
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG);
         address hookAddress;
+        bytes32 salt;
         if (keccak256(bytes(template)) == keccak256(bytes("SWAP_CAP_HOOK"))) {
             SwapCapHook module = new SwapCapHook(capAmount);
             bytes memory args = abi.encode(manager, module);
-            (hookAddress, bytes32 salt) = HookMinerLite.find(
+            (hookAddress, salt) = HookMinerLite.find(
                 CREATE2_DEPLOYER,
                 flags,
                 type(SwapCapHookAdapter).creationCode,
@@ -83,7 +84,7 @@ contract V4Proof is Script {
         } else {
             WhitelistHook module = new WhitelistHook(allowA, allowB);
             bytes memory args = abi.encode(manager, module);
-            (hookAddress, bytes32 salt) = HookMinerLite.find(
+            (hookAddress, salt) = HookMinerLite.find(
                 CREATE2_DEPLOYER,
                 flags,
                 type(WhitelistHookAdapter).creationCode,
@@ -131,10 +132,7 @@ contract V4Proof is Script {
             amountSpecified: int256(1e18),
             sqrtPriceLimitX96: sqrtPriceLimitX96
         });
-        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
-            withdrawTokens: true,
-            settleUsingTransfer: true
-        });
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
         swapTest.swap(key, swapParams, settings, bytes(""));
 
         PoolId poolId = PoolIdLibrary.toId(key);

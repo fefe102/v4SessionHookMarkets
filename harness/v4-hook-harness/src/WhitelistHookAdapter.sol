@@ -48,6 +48,6 @@ contract WhitelistHookAdapter {
     ) external view returns (bytes4, BeforeSwapDelta, uint24) {
         require(msg.sender == address(manager), "ONLY_MANAGER");
         require(module.canSwap(sender), "NOT_ALLOWLISTED");
-        return (WhitelistHookAdapter.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO, 0);
+        return (WhitelistHookAdapter.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 }

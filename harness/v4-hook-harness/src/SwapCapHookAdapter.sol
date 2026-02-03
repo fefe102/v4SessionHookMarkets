@@ -49,6 +49,6 @@ contract SwapCapHookAdapter {
         require(msg.sender == address(manager), "ONLY_MANAGER");
         uint256 amount = params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
         require(module.canSwap(amount), "CAP");
-        return (SwapCapHookAdapter.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO, 0);
+        return (SwapCapHookAdapter.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 }

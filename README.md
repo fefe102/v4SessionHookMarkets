@@ -50,6 +50,12 @@ Notes:
 
 2) Fund the requester on Yellow sandbox (offchain ledger, not ERC20):
 
+Yellow sandbox funds are separate from Base Sepolia ETH:
+- Base Sepolia ETH pays gas for the verifier's onchain proof txs.
+- Yellow `ytest.usd` funds the offchain quote rewards + milestone payouts in the session.
+
+Call the faucet for the *requester address* (the address derived from `YELLOW_PRIVATE_KEY`):
+
 ```bash
 curl -sS -X POST https://clearnet-sandbox.yellow.com/faucet/requestTokens \
   -H 'content-type: application/json' \

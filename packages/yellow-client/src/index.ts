@@ -21,6 +21,7 @@ import {
   getMethod,
   getResult,
   NitroliteClient,
+  StateIntent,
   WalletStateSigner,
 } from '@erc7824/nitrolite';
 import { createPublicClient, createWalletClient, http, type Address, type Hex } from 'viem';
@@ -146,6 +147,7 @@ export class YellowClient {
 
   private rpc?: YellowRpcClient;
   private walletAddress?: Address;
+  private publicClient?: ReturnType<typeof createPublicClient>;
   private sessionPrivateKey?: Hex;
   private sessionSigner?: (payload: any) => Promise<Hex>;
   private authSigner?: (payload: any) => Promise<Hex>;
@@ -330,6 +332,7 @@ export class YellowClient {
       chain: baseSepolia,
       transport: http(rpcUrl),
     });
+    this.publicClient = publicClient as any;
 
     this.currentAllowanceUnits = requestedUnits;
 
@@ -363,14 +366,18 @@ export class YellowClient {
     });
     const channelResponse = await this.rpc.send(createChannelMessage);
     const result = (getResult(channelResponse as any) ?? channelResponse.res?.[2]) as any;
-    if (!result?.channel || !result?.state || !result?.serverSignature) return;
+    const channel = result?.channel;
+    const state = result?.state;
+    const serverSignature = result?.serverSignature ?? result?.server_signature;
+    if (!channel || !state || !serverSignature) return;
 
-    const channel = convertRPCToClientChannel(result.channel);
+    const clientChannel = convertRPCToClientChannel(channel);
+    const stateData = (state.stateData ?? state.state_data ?? state.stateData) as Hex;
     const unsignedInitialState = {
-      intent: result.state.intent as any,
-      version: BigInt(result.state.version),
-      data: result.state.stateData as Hex,
-      allocations: result.state.allocations.map((allocation: any) => ({
+      intent: state.intent as any,
+      version: BigInt(state.version),
+      data: stateData,
+      allocations: state.allocations.map((allocation: any) => ({
         token: allocation.token,
         destination: allocation.destination,
         amount: BigInt(allocation.amount),
@@ -378,14 +385,18 @@ export class YellowClient {
     };
 
     const createResult = await this.nitroliteClient.createChannel({
-      channel,
+      channel: clientChannel,
       unsignedInitialState,
-      serverSignature: result.serverSignature as Hex,
+      serverSignature: serverSignature as Hex,
     });
 
     this.channelId = createResult.channelId as Hex;
+    if (this.publicClient) {
+      await this.publicClient.waitForTransactionReceipt({ hash: createResult.txHash as Hex });
+    }
 
-    const allocateAmount = BigInt(result.state.allocations?.[0]?.amount ?? 0n);
+    const allocateTotal = process.env.YELLOW_CHANNEL_ALLOCATE_TOTAL;
+    const allocateAmount = allocateTotal ? toUnits(allocateTotal, this.assetDecimals) : 0n;
     if (allocateAmount > 0n) {
       const resizeMessage = await createResizeChannelMessage(this.sessionSigner, {
         channel_id: createResult.channelId,
@@ -394,15 +405,18 @@ export class YellowClient {
       });
     const resizeResponse = await this.rpc.send(resizeMessage);
     const resizeResult = (getResult(resizeResponse as any) ?? resizeResponse.res?.[2]) as any;
-      if (resizeResult?.state && resizeResult?.serverSignature) {
+      const resizeState = resizeResult?.state;
+      const resizeServerSig = resizeResult?.serverSignature ?? resizeResult?.server_signature;
+      const resizeStateData = (resizeState?.stateData ?? resizeState?.state_data ?? resizeState?.stateData) as Hex | undefined;
+      if (resizeState && resizeServerSig && resizeStateData) {
         await this.nitroliteClient.resizeChannel({
           resizeState: {
             channelId: createResult.channelId,
-            serverSignature: resizeResult.serverSignature,
-            intent: resizeResult.state.intent as any,
-            version: BigInt(resizeResult.state.version),
-            data: resizeResult.state.stateData as Hex,
-            allocations: resizeResult.state.allocations.map((allocation: any) => ({
+            serverSignature: resizeServerSig,
+            intent: resizeState.intent as any,
+            version: BigInt(resizeState.version),
+            data: resizeStateData,
+            allocations: resizeState.allocations.map((allocation: any) => ({
               token: allocation.token,
               destination: allocation.destination,
               amount: BigInt(allocation.amount),
@@ -418,12 +432,20 @@ export class YellowClient {
     workOrderId: string;
     allowanceTotal: string;
     allocationTotal: string;
-    solverAddress: string;
+    solverAddresses: string[];
     requesterAddress?: string | null;
   }) {
     if (this.mode === 'mock') {
       const requester = input.requesterAddress ?? '0x0000000000000000000000000000000000000001';
-      const participants = [requester, input.solverAddress];
+      const solverSet = new Set<string>();
+      const solvers: string[] = [];
+      for (const addr of input.solverAddresses) {
+        const lower = addr.toLowerCase();
+        if (solverSet.has(lower)) continue;
+        solverSet.add(lower);
+        solvers.push(addr);
+      }
+      const participants = [requester, ...solvers];
       return {
         sessionId: `yellow_mock_${randomUUID()}`,
         allowanceTotal: input.allowanceTotal,
@@ -447,7 +469,17 @@ export class YellowClient {
       if (!requester) {
         throw new Error('Missing requester address for Yellow session');
       }
-      const participants = [requester, input.solverAddress];
+      // Stable ordering matters: requester is always index 0 (payer),
+      // and we preserve the given solver order after de-duping.
+      const solverSet = new Set<string>();
+      const solvers: string[] = [];
+      for (const addr of input.solverAddresses) {
+        const lower = addr.toLowerCase();
+        if (solverSet.has(lower)) continue;
+        solverSet.add(lower);
+        solvers.push(addr);
+      }
+      const participants = [requester, ...solvers];
       const allocations = participants.map((participant, index) => ({
         asset: this.assetSymbol as string,
         amount: index === 0 ? input.allocationTotal : '0',
@@ -638,13 +670,60 @@ export class YellowClient {
         throw new Error(`Yellow close session failed: ${errResult?.error ?? 'unknown error'}`);
       }
 
-      if (process.env.YELLOW_ENABLE_CHANNELS === 'true' && this.channelId) {
-        const closeMessage = await createCloseChannelMessage(
-          this.sessionSigner,
-          this.channelId,
-          (this.walletAddress ?? '0x0000000000000000000000000000000000000000') as Address
-        );
-        await this.rpc.send(closeMessage);
+      if (process.env.YELLOW_ENABLE_CHANNELS === 'true') {
+        try {
+          await this.ensureChannel();
+          if (!this.channelId || !this.nitroliteClient) {
+            throw new Error('Missing nitrolite channel state');
+          }
+          const fundDestination = (this.walletAddress ?? '0x0000000000000000000000000000000000000000') as Address;
+          const closeMessage = await createCloseChannelMessage(this.sessionSigner, this.channelId, fundDestination);
+          const closeResponse = await this.rpc.send(closeMessage);
+          const closeResult = (getResult(closeResponse as any) ?? closeResponse.res?.[2]) as any;
+
+          const channelId = (closeResult?.channelId ?? closeResult?.channel_id ?? this.channelId) as Hex;
+          const state = closeResult?.state;
+          const serverSignature = closeResult?.serverSignature ?? closeResult?.server_signature;
+          const stateData = (state?.stateData ?? state?.state_data ?? state?.stateData) as Hex | undefined;
+          if (!state || !serverSignature || !stateData) {
+            throw new Error('Missing close_channel params from server');
+          }
+
+          const txHash = await this.nitroliteClient.closeChannel({
+            stateData,
+            finalState: {
+              channelId,
+              intent: StateIntent.FINALIZE,
+              version: BigInt(state.version),
+              data: stateData,
+              allocations: state.allocations.map((allocation: any) => ({
+                token: allocation.token,
+                destination: allocation.destination,
+                amount: BigInt(allocation.amount),
+              })),
+              serverSignature,
+            },
+          });
+
+          if (this.publicClient) {
+            await this.publicClient.waitForTransactionReceipt({ hash: txHash as Hex });
+          }
+
+          return {
+            settlementTxId: String(txHash),
+            workOrderId: input.workOrderId,
+            apiUrl: this.apiUrl ?? null,
+          };
+        } catch (err) {
+          // Fall back to an offchain receipt if channel close/settlement is not available.
+          // This keeps the demo flow running even when the onchain custody token is unfunded.
+          const message = String((err as any)?.message ?? err);
+          return {
+            settlementTxId: `yellow_channel_close_failed:${message}`,
+            workOrderId: input.workOrderId,
+            apiUrl: this.apiUrl ?? null,
+          };
+        }
       }
 
       return {

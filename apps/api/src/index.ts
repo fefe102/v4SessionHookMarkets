@@ -110,11 +110,21 @@ function saveSolverStats(stats: SolverStats) {
 }
 
 function selectBestQuote(quotes: QuotePayload[]) {
+  const reputation = new Map<string, number>();
+  for (const quote of quotes) {
+    const key = quote.solverAddress.toLowerCase();
+    if (reputation.has(key)) continue;
+    reputation.set(key, calculateReputation(getSolverStats(quote.solverAddress)).score);
+  }
+
   return [...quotes].sort((a, b) => {
     const priceDiff = Number(a.price) - Number(b.price);
     if (priceDiff !== 0) return priceDiff;
     const etaDiff = a.etaMinutes - b.etaMinutes;
     if (etaDiff !== 0) return etaDiff;
+    const repA = reputation.get(a.solverAddress.toLowerCase()) ?? 0;
+    const repB = reputation.get(b.solverAddress.toLowerCase()) ?? 0;
+    if (repA !== repB) return repB - repA;
     return a.createdAt - b.createdAt;
   })[0];
 }
@@ -164,21 +174,38 @@ function computeAllowanceTotal(workOrder: WorkOrder) {
     ?? (Number(workOrder.bounty.amount) + QUOTE_REWARD * MAX_QUOTE_REWARDS).toFixed(2);
 }
 
-async function ensureYellowSession(workOrder: WorkOrder, solverAddress: string) {
-  if (
-    workOrder.yellow.yellowSessionId &&
-    workOrder.yellow.participants?.some((participant) => participant.toLowerCase() === solverAddress.toLowerCase())
-  ) {
-    const sessionState = buildSessionState(workOrder);
-    if (sessionState) return sessionState;
+function collectSessionSolversFromQuotes(quotes: QuotePayload[]) {
+  const sorted = [...quotes].sort((a, b) => a.createdAt - b.createdAt);
+  const solvers: string[] = [];
+  const seen = new Set<string>();
+  for (const quote of sorted) {
+    const key = quote.solverAddress.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    solvers.push(quote.solverAddress);
+    if (solvers.length >= MAX_QUOTE_REWARDS) break;
+  }
+  return solvers;
+}
+
+async function ensureYellowSession(workOrder: WorkOrder, quotes: QuotePayload[]) {
+  const existing = buildSessionState(workOrder);
+  if (existing) return existing;
+
+  const solverAddresses = collectSessionSolversFromQuotes(quotes);
+  if (solverAddresses.length === 0) {
+    throw new Error('Cannot create Yellow session without any solver quotes');
   }
 
   const allowanceTotal = computeAllowanceTotal(workOrder);
+  // Session allocations must cover both bounty payouts and quote rewards.
+  const allocationTotal = allowanceTotal;
+
   const session = await yellowClient.createSession({
     workOrderId: workOrder.id,
     allowanceTotal,
-    allocationTotal: String(workOrder.bounty.amount),
-    solverAddress,
+    allocationTotal,
+    solverAddresses,
     requesterAddress: workOrder.requesterAddress ?? undefined,
   });
   applySessionState(workOrder, session);
@@ -225,6 +252,33 @@ async function recordPayment(workOrder: WorkOrder, paymentEvent: PaymentEvent) {
     payload: paymentEvent,
   });
   return paymentEvent;
+}
+
+async function ensureQuoteRewardsPaid(workOrder: WorkOrder, quotes: QuotePayload[]) {
+  const solvers = collectSessionSolversFromQuotes(quotes);
+  if (solvers.length === 0) return;
+
+  const alreadyPaidTo = new Set(
+    db
+      .listPaymentEvents(workOrder.id)
+      .filter((evt) => evt.type === 'QUOTE_REWARD')
+      .map((evt) => (evt.payload as PaymentEvent).toAddress.toLowerCase())
+  );
+
+  for (const solverAddress of solvers) {
+    if (alreadyPaidTo.has(solverAddress.toLowerCase())) continue;
+    const paymentEvent: PaymentEvent = {
+      id: randomUUID(),
+      workOrderId: workOrder.id,
+      type: 'QUOTE_REWARD',
+      toAddress: solverAddress,
+      amount: QUOTE_REWARD.toFixed(2),
+      yellowTransferId: null,
+      createdAt: Date.now(),
+    };
+    await recordPayment(workOrder, paymentEvent);
+    emit(workOrder.id, 'quoteRewardPaid', paymentEvent);
+  }
 }
 
 async function settleWorkOrder(workOrder: WorkOrder) {
@@ -472,30 +526,43 @@ server.post('/work-orders/:id/select', async (request, reply) => {
     return reply.status(400).send({ error: 'Work order cannot be selected in the current state' });
   }
 
+  if (workOrder.status === 'BIDDING' && Date.now() < workOrder.bidding.biddingEndsAt) {
+    return reply.status(400).send({ error: 'Bidding window still open' });
+  }
+
   const quotes = db.listQuotes(id).map((q) => q.payload as QuotePayload);
   if (quotes.length === 0) {
     return reply.status(400).send({ error: 'No quotes to select' });
   }
 
+  try {
+    const session = await ensureYellowSession(workOrder, quotes);
+    emit(id, 'yellowSessionCreated', session);
+    await ensureQuoteRewardsPaid(workOrder, quotes);
+  } catch (error) {
+    server.log.error(error, 'failed to create Yellow session');
+    return reply.status(500).send({ error: 'Failed to create Yellow session' });
+  }
+
+  const allowedSolvers = new Set(
+    (workOrder.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
+  );
+  const eligibleQuotes = quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()));
+  if (eligibleQuotes.length === 0) {
+    return reply.status(400).send({ error: 'No eligible quotes (session participant cap reached)' });
+  }
+
   const attempted = workOrder.selection.attemptedQuoteIds ?? [];
-  const availableQuotes = quotes.filter((quote) => !attempted.includes(quote.id));
+  const availableQuotes = eligibleQuotes.filter((quote) => !attempted.includes(quote.id));
   const selectedQuote = body?.quoteId
-    ? quotes.find((quote) => quote.id === body.quoteId)
-    : selectBestQuote(availableQuotes.length > 0 ? availableQuotes : quotes);
+    ? eligibleQuotes.find((quote) => quote.id === body.quoteId)
+    : selectBestQuote(availableQuotes.length > 0 ? availableQuotes : eligibleQuotes);
 
   if (!selectedQuote) {
     return reply.status(404).send({ error: 'Quote not found' });
   }
 
   applySelection(workOrder, selectedQuote);
-
-  try {
-    const session = await ensureYellowSession(workOrder, selectedQuote.solverAddress);
-    emit(id, 'yellowSessionCreated', session);
-  } catch (error) {
-    server.log.error(error, 'failed to create Yellow session');
-    return reply.status(500).send({ error: 'Failed to create Yellow session' });
-  }
 
   const winStats = getSolverStats(selectedQuote.solverAddress);
   winStats.quotesWon += 1;
@@ -679,16 +746,23 @@ server.post('/work-orders/:id/submit', async (request, reply) => {
     }
 
     const quotes = db.listQuotes(workOrder.id).map((q) => q.payload as QuotePayload);
-    const fallbackQuote = selectNextQuote(quotes, attempted);
+    try {
+      const session = await ensureYellowSession(workOrder, quotes);
+      emit(workOrder.id, 'yellowSessionCreated', session);
+    } catch (error) {
+      server.log.error(error, 'failed to ensure Yellow session for fallback selection');
+    }
+
+    const allowedSolvers = new Set(
+      (workOrder.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
+    );
+    const eligibleQuotes = allowedSolvers.size > 0
+      ? quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()))
+      : quotes;
+
+    const fallbackQuote = selectNextQuote(eligibleQuotes, attempted);
     if (fallbackQuote) {
       applySelection(workOrder, fallbackQuote);
-      try {
-        const session = await ensureYellowSession(workOrder, fallbackQuote.solverAddress);
-        emit(workOrder.id, 'yellowSessionCreated', session);
-      } catch (error) {
-        server.log.error(error, 'failed to create Yellow session for fallback');
-        workOrder.status = 'FAILED';
-      }
       emit(workOrder.id, 'solverFallbackSelected', { quote: fallbackQuote });
     } else {
       workOrder.status = 'FAILED';
@@ -803,36 +877,6 @@ server.post('/solver/quotes', async (request, reply) => {
   quoteStats.quotesSubmitted += 1;
   saveSolverStats(quoteStats);
 
-  const rewardEvents = db.listPaymentEvents(body.workOrderId).filter((evt) => evt.type === 'QUOTE_REWARD');
-  if (rewardEvents.length < MAX_QUOTE_REWARDS) {
-    const paymentEvent: PaymentEvent = {
-      id: randomUUID(),
-      workOrderId: body.workOrderId,
-      type: 'QUOTE_REWARD',
-      toAddress: body.solverAddress,
-      amount: QUOTE_REWARD.toFixed(2),
-      yellowTransferId: null,
-      createdAt: Date.now(),
-    };
-    const transfer = await yellowClient.transfer({
-      workOrderId: workOrder.id,
-      event: paymentEvent,
-      sessionState: buildSessionState(workOrder),
-      allowanceTotal: workOrder.yellow.allowanceTotal,
-    });
-    paymentEvent.yellowTransferId = transfer.transferId;
-    applySessionState(workOrder, transfer.sessionState ?? null);
-    persistWorkOrder(workOrder);
-    db.insertPaymentEvent({
-      id: paymentEvent.id,
-      workOrderId: body.workOrderId,
-      createdAt: paymentEvent.createdAt,
-      type: paymentEvent.type,
-      payload: paymentEvent,
-    });
-    emit(body.workOrderId, 'quoteRewardPaid', paymentEvent);
-  }
-
   emit(body.workOrderId, 'quoteCreated', body);
 
   return reply.status(201).send(body);
@@ -874,6 +918,12 @@ server.post('/challenger/challenges', async (request, reply) => {
     return reply.status(400).send({ error: 'Challenge window not open' });
   }
 
+  const challengerInSession = (workOrder.yellow.participants ?? [])
+    .some((participant) => participant.toLowerCase() === body.challengerAddress.toLowerCase());
+  if (!challengerInSession) {
+    return reply.status(400).send({ error: 'Challenger must have joined the Yellow session during bidding' });
+  }
+
   const reproductionHash = sha256Hex(JSON.stringify(body.reproductionSpec ?? {}));
   const message: ChallengeMessage = {
     workOrderId: body.workOrderId,
@@ -885,10 +935,16 @@ server.post('/challenger/challenges', async (request, reply) => {
     return reply.status(400).send({ error: 'Invalid challenge signature' });
   }
 
+  const submissionRecord = db.getSubmission(body.submissionId);
+  if (!submissionRecord) return reply.status(404).send({ error: 'Submission not found' });
+  if (submissionRecord.workOrderId !== body.workOrderId) {
+    return reply.status(400).send({ error: 'Submission does not belong to work order' });
+  }
+
   const verifierResponse = await fetch(`${VERIFIER_URL}/challenge`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workOrder, challenge: body }),
+    body: JSON.stringify({ workOrder, submission: submissionRecord.payload, challenge: body }),
   });
 
   if (!verifierResponse.ok) {
@@ -989,17 +1045,32 @@ async function sweepWorkOrders() {
         emit(workOrder.id, 'workOrderExpired', { reason: 'no_quotes' });
         continue;
       }
-      const attempted = workOrder.selection.attemptedQuoteIds ?? [];
-      const selectedQuote = selectNextQuote(quotes, attempted) ?? selectBestQuote(quotes);
-      if (!selectedQuote) continue;
-      applySelection(workOrder, selectedQuote);
+
       try {
-        const session = await ensureYellowSession(workOrder, selectedQuote.solverAddress);
+        const session = await ensureYellowSession(workOrder, quotes);
         emit(workOrder.id, 'yellowSessionCreated', session);
+        await ensureQuoteRewardsPaid(workOrder, quotes);
       } catch (error) {
         server.log.error(error, 'failed to create Yellow session (auto)');
         continue;
       }
+
+      const allowedSolvers = new Set(
+        (workOrder.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
+      );
+      const eligibleQuotes = quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()));
+      if (eligibleQuotes.length === 0) {
+        workOrder.status = 'EXPIRED';
+        persistWorkOrder(workOrder);
+        emit(workOrder.id, 'workOrderExpired', { reason: 'session_participant_cap' });
+        continue;
+      }
+
+      const attempted = workOrder.selection.attemptedQuoteIds ?? [];
+      const selectedQuote = selectNextQuote(eligibleQuotes, attempted) ?? selectBestQuote(eligibleQuotes);
+      if (!selectedQuote) continue;
+      applySelection(workOrder, selectedQuote);
+
       const winStats = getSolverStats(selectedQuote.solverAddress);
       winStats.quotesWon += 1;
       saveSolverStats(winStats);

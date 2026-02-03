@@ -146,6 +146,9 @@ export function createDb() {
   const insertSubmissionStmt = db.prepare(
     'INSERT INTO submissions (id, work_order_id, created_at, payload_json) VALUES (?, ?, ?, ?)'
   );
+  const getSubmissionStmt = db.prepare(
+    'SELECT id, work_order_id, created_at, payload_json FROM submissions WHERE id = ? LIMIT 1'
+  );
   const listSubmissionsStmt = db.prepare(
     'SELECT id, work_order_id, created_at, payload_json FROM submissions WHERE work_order_id = ? ORDER BY created_at ASC'
   );
@@ -244,6 +247,18 @@ export function createDb() {
         record.createdAt,
         JSON.stringify(record.payload)
       );
+    },
+    getSubmission(id: string): SubmissionRecord | null {
+      const row = getSubmissionStmt.get(id) as
+        | { id: string; work_order_id: string; created_at: number; payload_json: string }
+        | undefined;
+      if (!row) return null;
+      return {
+        id: row.id,
+        workOrderId: row.work_order_id,
+        createdAt: row.created_at,
+        payload: JSON.parse(row.payload_json),
+      };
     },
     listSubmissions(workOrderId: string): SubmissionRecord[] {
       const rows = listSubmissionsStmt.all(workOrderId) as Array<{

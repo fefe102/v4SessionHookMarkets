@@ -42,6 +42,7 @@ Notes:
 - After verification passes, the challenge window opens; the API auto-settles when it expires.
 - Quote rewards are paid when the bidding window closes (the Yellow session is created at bidding close so all quote rewards happen inside the same session).
 - To receive a challenge reward inside the same Yellow session, challengers must submit a signed quote during bidding (so they are included as a session participant).
+- For Yellow prize demos, set `YELLOW_MILESTONE_SPLITS=5` (or higher) to stream each milestone as multiple offchain transfers.
 
 ## Real mode (Yellow + Base Sepolia proof)
 
@@ -77,7 +78,7 @@ git -C lib/v4-core submodule update --init --recursive
 
 5) Run verifier + API as usual. The verifier will:
 - `forge build` + `forge test`
-- broadcast `script/V4Proof.s.sol` to Base Sepolia
+- broadcast `script/V4Proof.s.sol` to Base Sepolia (includes a deterministic "agent loop" of swaps/liquidity ops; configure with `V4_AGENT_STEPS`)
 - capture txids + proof JSON
 
 ## Notes
@@ -90,4 +91,4 @@ git -C lib/v4-core submodule update --init --recursive
 
 The verifier executes untrusted code (solver artifacts + Foundry). For a hackathon demo this repo assumes solvers are trusted bots and artifacts are simple template-based Solidity modules.
 
-For production or public submissions, run verification in a sandbox (e.g., Docker with a locked-down filesystem and minimal network egress) to reduce risk from malicious repositories.
+For production or public submissions, run verification in a sandbox. This repo supports `VERIFIER_SANDBOX=docker` (Foundry runs inside a container, with `--network=none` for build/tests).

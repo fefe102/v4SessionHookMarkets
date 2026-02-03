@@ -40,6 +40,8 @@ Open http://localhost:3000, create a work order, and watch quotes + verification
 Notes:
 - The API auto-selects the best quote after the bidding window closes, or you can call `POST /work-orders/:id/select`.
 - After verification passes, the challenge window opens; the API auto-settles when it expires.
+- Quote rewards are paid when the bidding window closes (the Yellow session is created at bidding close so all quote rewards happen inside the same session).
+- To receive a challenge reward inside the same Yellow session, challengers must submit a signed quote during bidding (so they are included as a session participant).
 
 ## Real mode (Yellow + Base Sepolia proof)
 
@@ -53,6 +55,7 @@ Notes:
 Yellow sandbox funds are separate from Base Sepolia ETH:
 - Base Sepolia ETH pays gas for the verifier's onchain proof txs.
 - Yellow `ytest.usd` funds the offchain quote rewards + milestone payouts in the session.
+ - Optional: `YELLOW_ENABLE_CHANNELS=true` will attempt to close a Nitrolite channel and return an onchain tx hash, but requires the requester wallet to have Base Sepolia ETH for gas and an onchain custody balance for `ytest.usd` (not provided by the sandbox faucet).
 
 Call the faucet for the *requester address* (the address derived from `YELLOW_PRIVATE_KEY`):
 
@@ -82,3 +85,9 @@ git -C lib/v4-core submodule update --init --recursive
 - SQLite state lives in `data/app.sqlite` (ignored).
 - Verification reports + logs are written to `data/reports/` and `data/logs/`.
 - EIP-712 signing is enforced for quotes, submissions, and challenges.
+
+## Security / Sandbox Notes
+
+The verifier executes untrusted code (solver artifacts + Foundry). For a hackathon demo this repo assumes solvers are trusted bots and artifacts are simple template-based Solidity modules.
+
+For production or public submissions, run verification in a sandbox (e.g., Docker with a locked-down filesystem and minimal network egress) to reduce risk from malicious repositories.

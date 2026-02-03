@@ -43,6 +43,7 @@ Notes:
 - Quote rewards are paid when the bidding window closes (the Yellow session is created at bidding close so all quote rewards happen inside the same session).
 - To receive a challenge reward inside the same Yellow session, challengers must submit a signed quote during bidding (so they are included as a session participant).
 - For Yellow prize demos, set `YELLOW_MILESTONE_SPLITS=5` (or higher) to stream each milestone as multiple offchain transfers.
+- Optional LI.FI prize: open http://localhost:3000/lifi to bridge/swap cross-chain (fund requester or cash out). Requires a browser wallet.
 
 ## Real mode (Yellow + Base Sepolia proof)
 

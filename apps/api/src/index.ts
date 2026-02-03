@@ -33,6 +33,7 @@ const CHALLENGE_WINDOW_MS = 10 * 60 * 1000;
 const PATCH_WINDOW_MS = 10 * 60 * 1000;
 const QUOTE_REWARD = 0.01;
 const MAX_QUOTE_REWARDS = 20;
+const MILESTONE_SPLITS = Math.max(1, Math.min(20, Number(process.env.YELLOW_MILESTONE_SPLITS ?? 1)));
 const AUTO_TICK_MS = 5 * 1000;
 
 const VERIFIER_URL = process.env.VERIFIER_URL ?? 'http://localhost:3002';
@@ -85,6 +86,39 @@ function applySessionState(workOrder: WorkOrder, sessionState: YellowSessionStat
   workOrder.yellow.participants = sessionState.participants;
   workOrder.yellow.allocations = sessionState.allocations;
   workOrder.yellow.sessionVersion = sessionState.version;
+}
+
+function toUnits(amount: string, decimals: number): bigint {
+  const [whole, frac = ''] = amount.split('.');
+  const padded = `${whole}${frac.padEnd(decimals, '0')}`.replace(/^0+/, '') || '0';
+  return BigInt(padded);
+}
+
+function fromUnits(value: bigint, decimals: number): string {
+  const raw = value.toString().padStart(decimals + 1, '0');
+  const whole = raw.slice(0, -decimals) || '0';
+  const frac = raw.slice(-decimals).replace(/0+$/, '');
+  return frac ? `${whole}.${frac}` : whole;
+}
+
+function splitUnits(total: bigint, parts: number): bigint[] {
+  if (parts <= 1) return [total];
+  const p = BigInt(parts);
+  const base = total / p;
+  const rem = total % p;
+  const out: bigint[] = [];
+  for (let i = 0; i < parts; i++) {
+    out.push(base + (BigInt(i) < rem ? 1n : 0n));
+  }
+  return out.filter((v) => v > 0n);
+}
+
+function totalPaidForMilestone(workOrderId: string, milestoneKey: string, toAddress: string): bigint {
+  const payments = db.listPaymentEvents(workOrderId).map((evt) => evt.payload as PaymentEvent);
+  const lower = toAddress.toLowerCase();
+  return payments
+    .filter((evt) => evt.type === 'MILESTONE' && evt.milestoneKey === milestoneKey && evt.toAddress.toLowerCase() === lower)
+    .reduce((acc, evt) => acc + toUnits(String(evt.amount), YELLOW_ASSET.decimals), 0n);
 }
 
 function persistWorkOrder(workOrder: WorkOrder) {
@@ -292,14 +326,16 @@ async function settleWorkOrder(workOrder: WorkOrder) {
   const basePrice = selectedQuote ? Number(selectedQuote.price) : Number(workOrder.bounty.amount);
   const holdback = ((basePrice * 20) / 100).toFixed(4);
 
-  const alreadyPaid = hasPaymentEvent(workOrder.id, (evt) => evt.type === 'MILESTONE' && evt.milestoneKey === 'M5_NO_CHALLENGE_OR_PATCH_OK');
-  if (!alreadyPaid) {
+  const solver = workOrder.selection.selectedSolverId ?? '0x0000000000000000000000000000000000000000';
+  const holdbackUnits = toUnits(holdback, YELLOW_ASSET.decimals);
+  const alreadyPaidUnits = totalPaidForMilestone(workOrder.id, 'M5_NO_CHALLENGE_OR_PATCH_OK', solver);
+  if (alreadyPaidUnits < holdbackUnits) {
     const paymentEvent: PaymentEvent = {
       id: randomUUID(),
       workOrderId: workOrder.id,
       type: 'MILESTONE',
-      toAddress: workOrder.selection.selectedSolverId ?? '0x0000000000000000000000000000000000000000',
-      amount: holdback,
+      toAddress: solver,
+      amount: fromUnits(holdbackUnits - alreadyPaidUnits, YELLOW_ASSET.decimals),
       yellowTransferId: null,
       milestoneKey: 'M5_NO_CHALLENGE_OR_PATCH_OK',
       createdAt: Date.now(),
@@ -697,34 +733,27 @@ server.post('/work-orders/:id/submit', async (request, reply) => {
     const basePrice = selectedQuote ? Number(selectedQuote.price) : Number(workOrder.bounty.amount);
     for (const milestone of workOrder.milestones.payoutSchedule) {
       if (!report.milestonesPassed.includes(milestone.key)) continue;
-      const amount = ((basePrice * milestone.percent) / 100).toFixed(4);
-      const paymentEvent: PaymentEvent = {
-        id: randomUUID(),
-        workOrderId: workOrder.id,
-        type: 'MILESTONE',
-        toAddress: body.solverAddress,
-        amount,
-        yellowTransferId: null,
-        milestoneKey: milestone.key,
-        createdAt: Date.now(),
-      };
-      const transfer = await yellowClient.transfer({
-        workOrderId: workOrder.id,
-        event: paymentEvent,
-        sessionState: buildSessionState(workOrder),
-        allowanceTotal: workOrder.yellow.allowanceTotal,
-      });
-      paymentEvent.yellowTransferId = transfer.transferId;
-      applySessionState(workOrder, transfer.sessionState ?? null);
-      persistWorkOrder(workOrder);
-      db.insertPaymentEvent({
-        id: paymentEvent.id,
-        workOrderId: workOrder.id,
-        createdAt: paymentEvent.createdAt,
-        type: paymentEvent.type,
-        payload: paymentEvent,
-      });
-      emit(workOrder.id, 'milestonePaid', paymentEvent);
+      const targetAmount = ((basePrice * milestone.percent) / 100).toFixed(4);
+      const targetUnits = toUnits(targetAmount, YELLOW_ASSET.decimals);
+      const alreadyPaidUnits = totalPaidForMilestone(workOrder.id, milestone.key, body.solverAddress);
+      if (alreadyPaidUnits >= targetUnits) continue;
+
+      const remainingUnits = targetUnits - alreadyPaidUnits;
+      const splitCount = milestone.key === 'M5_NO_CHALLENGE_OR_PATCH_OK' ? 1 : MILESTONE_SPLITS;
+      for (const partUnits of splitUnits(remainingUnits, splitCount)) {
+        const paymentEvent: PaymentEvent = {
+          id: randomUUID(),
+          workOrderId: workOrder.id,
+          type: 'MILESTONE',
+          toAddress: body.solverAddress,
+          amount: fromUnits(partUnits, YELLOW_ASSET.decimals),
+          yellowTransferId: null,
+          milestoneKey: milestone.key,
+          createdAt: Date.now(),
+        };
+        await recordPayment(workOrder, paymentEvent);
+        emit(workOrder.id, 'milestonePaid', paymentEvent);
+      }
     }
   } else {
     emit(id, 'verificationFailed', report.report);

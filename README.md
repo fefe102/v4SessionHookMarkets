@@ -19,20 +19,8 @@ Verifiable work market for Uniswap v4 hook modules. Requesters post HookSpecs wi
 ```bash
 pnpm install
 
-# Terminal 1: verifier (mock)
-pnpm -C apps/verifier dev
-
-# Terminal 2: API
-pnpm -C apps/api dev
-
-# Terminal 3: web
-pnpm -C apps/web dev
-
-# Terminal 4: solver bot (set SOLVER_PRIVATE_KEY)
-SOLVER_PRIVATE_KEY=0x... pnpm -C apps/solver-bot dev
-
-# Optional: run a second solver bot (different key + price)
-SOLVER_PRIVATE_KEY=0x... SOLVER_PRICE=9 SOLVER_ETA_MINUTES=12 pnpm -C apps/solver-bot dev
+# One command (recommended): starts API + verifier + web + bots (reads .env if present)
+pnpm demo:up
 ```
 
 Open http://localhost:3000, create a work order, and watch quotes + verification events flow through.
@@ -44,6 +32,23 @@ Notes:
 - To receive a challenge reward inside the same Yellow session, challengers must submit a signed quote during bidding (so they are included as a session participant).
 - For Yellow prize demos, set `YELLOW_MILESTONE_SPLITS=5` (or higher) to stream each milestone as multiple offchain transfers.
 - Optional LI.FI prize: open http://localhost:3000/lifi to bridge/swap cross-chain (fund requester or cash out). Requires a browser wallet.
+
+Manual startup (if you prefer separate terminals):
+
+```bash
+# Terminal 1
+pnpm -C apps/verifier dev
+
+# Terminal 2
+pnpm -C apps/api dev
+
+# Terminal 3
+pnpm -C apps/web dev
+
+# Terminal 4 (optional bots; set BOT_POLL_MS=5000 for polling)
+BOT_POLL_MS=5000 pnpm -C apps/solver-bot dev
+BOT_POLL_MS=5000 pnpm -C apps/challenger-bot dev
+```
 
 ## Real mode (Yellow + Base Sepolia proof)
 

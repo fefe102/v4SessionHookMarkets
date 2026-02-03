@@ -38,6 +38,19 @@ export default async function HomePage() {
           )}
         </div>
       </section>
+
+      <section className="section grid two">
+        <Link href="/lifi" className="card">
+          <span className="badge">Optional</span>
+          <h3>LI.FI Bridge / Swap</h3>
+          <p>Cross-chain funding and cash-out (optional prize).</p>
+        </Link>
+        <div className="card">
+          <h3>Demo Tips</h3>
+          <p>Set <code>YELLOW_MILESTONE_SPLITS=5</code> for many offchain transfers.</p>
+          <p>Set <code>V4_AGENT_STEPS=5</code> for a multi-tx v4 “agent loop”.</p>
+        </div>
+      </section>
     </>
   );
 }

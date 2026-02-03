@@ -146,6 +146,7 @@ export class YellowClient {
 
   private rpc?: YellowRpcClient;
   private walletAddress?: Address;
+  private sessionPrivateKey?: Hex;
   private sessionSigner?: (payload: any) => Promise<Hex>;
   private authSigner?: (payload: any) => Promise<Hex>;
   private nitroliteClient?: NitroliteClient;
@@ -165,6 +166,33 @@ export class YellowClient {
 
   getRequesterAddress(): string | null {
     return this.walletAddress ?? null;
+  }
+
+  private resetSessionAuth() {
+    // Keep the existing session key so we can continue operating on already-created app sessions.
+    this.authSigner = undefined;
+    this.currentAllowanceUnits = undefined;
+    // Channel state is tied to the session key, but this repo uses channels only optionally.
+    // Clear them to avoid a mismatch if users toggle channel mode.
+    this.nitroliteClient = undefined;
+    this.channelId = undefined;
+  }
+
+  private async withAuthRetry<T>(fn: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await fn();
+      } catch (err) {
+        const message = String((err as any)?.message ?? err);
+        if (attempt === 0 && message.toLowerCase().includes('authentication required')) {
+          // The Yellow sandbox sometimes requires re-auth after WS reconnects.
+          this.resetSessionAuth();
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error('unreachable');
   }
 
   private async initReal(allowanceTotal: string) {
@@ -212,12 +240,15 @@ export class YellowClient {
     }
 
     const requestedUnits = toUnits(allowanceTotal, this.assetDecimals);
-    if (this.sessionSigner && this.currentAllowanceUnits && requestedUnits <= this.currentAllowanceUnits) {
+    if (this.sessionSigner && this.currentAllowanceUnits && requestedUnits <= this.currentAllowanceUnits && this.authSigner) {
       return;
     }
 
-    const sessionPrivateKey = generatePrivateKey();
-    this.sessionSigner = createECDSAMessageSigner(sessionPrivateKey);
+    if (!this.sessionPrivateKey) {
+      this.sessionPrivateKey = generatePrivateKey();
+    }
+    this.sessionSigner = createECDSAMessageSigner(this.sessionPrivateKey);
+    const sessionKeyAddress = privateKeyToAccount(this.sessionPrivateKey).address;
 
     // Yellow auth policy uses decimal strings (e.g. "10.20"), not raw units.
     const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 60 * 60);
@@ -229,7 +260,7 @@ export class YellowClient {
 
     const authRequest = await createAuthRequestMessage({
       address: account.address,
-      session_key: privateKeyToAccount(sessionPrivateKey).address,
+      session_key: sessionKeyAddress,
       application: appName,
       allowances: [
         {
@@ -257,7 +288,7 @@ export class YellowClient {
       walletClient as any,
       {
         scope,
-        session_key: privateKeyToAccount(sessionPrivateKey).address,
+        session_key: sessionKeyAddress,
         expires_at: expiresAt,
         allowances: [
           {
@@ -388,62 +419,64 @@ export class YellowClient {
       } satisfies YellowSessionState;
     }
 
-    await this.initReal(input.allowanceTotal);
+    return this.withAuthRetry(async () => {
+      await this.initReal(input.allowanceTotal);
 
-    if (!this.rpc || !this.sessionSigner || !this.assetSymbol) {
-      throw new Error('Yellow client not initialized');
-    }
+      if (!this.rpc || !this.sessionSigner || !this.assetSymbol) {
+        throw new Error('Yellow client not initialized');
+      }
 
-    const requester = (input.requesterAddress ?? this.walletAddress) as string | undefined;
-    if (!requester) {
-      throw new Error('Missing requester address for Yellow session');
-    }
-    const participants = [requester, input.solverAddress];
-    const allocations = participants.map((participant, index) => ({
-      asset: this.assetSymbol as string,
-      amount: index === 0 ? input.allocationTotal : '0',
-      participant: participant as Address,
-    }));
-
-    const message = await createAppSessionMessage(this.sessionSigner, {
-      definition: {
-        // Must match the application name used in the auth_request policy.
-        application: process.env.YELLOW_APP_NAME ?? 'v4-session-hook-market',
-        protocol: RPCProtocolVersion.NitroRPC_0_4,
-        participants: participants as Hex[],
-        weights: participants.map(() => 1),
-        // We want the requester-delegated session key to be able to update app state
-        // without requiring co-signature from the solver (quorum of 1).
-        quorum: 1,
-        challenge: Number(process.env.YELLOW_CHALLENGE_DURATION_SECONDS ?? 3600),
-        nonce: Math.floor(Date.now() / 1000),
-      },
-      allocations,
-      session_data: JSON.stringify({ workOrderId: input.workOrderId }),
-    });
-
-    const response = await this.rpc.send(message);
-    if (getMethod(response as any) === 'error' || response.err) {
-      const errResult = (getResult(response as any) ?? response.res?.[2]) as any;
-      throw new Error(`Yellow create session failed: ${errResult?.error ?? 'unknown error'}`);
-    }
-    const result = (getResult(response as any) ?? response.res?.[2]) as any;
-    const sessionId = result?.app_session_id ?? result?.appSessionId ?? result?.appSessionID;
-    if (!sessionId) {
-      throw new Error('Missing app session id from Yellow');
-    }
-
-    const initialVersion = Number(result?.version ?? 0);
-    return {
-      sessionId,
-      allowanceTotal: input.allowanceTotal,
-      participants,
-      allocations: participants.map((participant, index) => ({
-        participant,
+      const requester = (input.requesterAddress ?? this.walletAddress) as string | undefined;
+      if (!requester) {
+        throw new Error('Missing requester address for Yellow session');
+      }
+      const participants = [requester, input.solverAddress];
+      const allocations = participants.map((participant, index) => ({
+        asset: this.assetSymbol as string,
         amount: index === 0 ? input.allocationTotal : '0',
-      })),
-      version: initialVersion,
-    } satisfies YellowSessionState;
+        participant: participant as Address,
+      }));
+
+      const message = await createAppSessionMessage(this.sessionSigner, {
+        definition: {
+          // Must match the application name used in the auth_request policy.
+          application: process.env.YELLOW_APP_NAME ?? 'v4-session-hook-market',
+          protocol: RPCProtocolVersion.NitroRPC_0_4,
+          participants: participants as Hex[],
+          weights: participants.map(() => 1),
+          // We want the requester-delegated session key to be able to update app state
+          // without requiring co-signature from the solver (quorum of 1).
+          quorum: 1,
+          challenge: Number(process.env.YELLOW_CHALLENGE_DURATION_SECONDS ?? 3600),
+          nonce: Math.floor(Date.now() / 1000),
+        },
+        allocations,
+        session_data: JSON.stringify({ workOrderId: input.workOrderId }),
+      });
+
+      const response = await this.rpc.send(message);
+      if (getMethod(response as any) === 'error' || response.err) {
+        const errResult = (getResult(response as any) ?? response.res?.[2]) as any;
+        throw new Error(`Yellow create session failed: ${errResult?.error ?? 'unknown error'}`);
+      }
+      const result = (getResult(response as any) ?? response.res?.[2]) as any;
+      const sessionId = result?.app_session_id ?? result?.appSessionId ?? result?.appSessionID;
+      if (!sessionId) {
+        throw new Error('Missing app session id from Yellow');
+      }
+
+      const initialVersion = Number(result?.version ?? 0);
+      return {
+        sessionId,
+        allowanceTotal: input.allowanceTotal,
+        participants,
+        allocations: participants.map((participant, index) => ({
+          participant,
+          amount: index === 0 ? input.allocationTotal : '0',
+        })),
+        version: initialVersion,
+      } satisfies YellowSessionState;
+    });
   }
 
   async transfer(input: {
@@ -459,97 +492,99 @@ export class YellowClient {
       };
     }
 
-    await this.initReal(input.sessionState?.allowanceTotal ?? input.allowanceTotal ?? input.event.amount);
+    return this.withAuthRetry(async () => {
+      await this.initReal(input.sessionState?.allowanceTotal ?? input.allowanceTotal ?? input.event.amount);
 
-    if (!this.rpc || !this.sessionSigner || !this.assetSymbol) {
-      throw new Error('Yellow client not initialized');
-    }
+      if (!this.rpc || !this.sessionSigner || !this.assetSymbol) {
+        throw new Error('Yellow client not initialized');
+      }
 
-    if (!input.sessionState) {
-      const message = await createTransferMessage(this.sessionSigner, {
-        destination: input.event.toAddress as Address,
-        allocations: [
-          {
-            asset: this.assetSymbol as string,
-            amount: input.event.amount,
-          },
-        ],
+      if (!input.sessionState) {
+        const message = await createTransferMessage(this.sessionSigner, {
+          destination: input.event.toAddress as Address,
+          allocations: [
+            {
+              asset: this.assetSymbol as string,
+              amount: input.event.amount,
+            },
+          ],
+        });
+        const response = await this.rpc.send(message);
+        if (getMethod(response as any) === 'error' || response.err) {
+          const errResult = (getResult(response as any) ?? response.res?.[2]) as any;
+          throw new Error(`Yellow transfer failed: ${errResult?.error ?? 'unknown error'}`);
+        }
+        const result = (getResult(response as any) ?? response.res?.[2]) as any;
+        return {
+          transferId: String(result?.transactions?.[0]?.id ?? randomUUID()),
+          sessionState: null,
+        };
+      }
+
+      const payer = input.sessionState.participants[0];
+      const payee = input.event.toAddress;
+      const amountUnits = toUnits(input.event.amount, this.assetDecimals);
+
+      // Preserve the original-cased participant addresses, because the server treats
+      // participant strings as exact identifiers (checksum casing matters).
+      const canonicalParticipants = new Map<string, string>();
+      for (const participant of input.sessionState.participants) {
+        canonicalParticipants.set(participant.toLowerCase(), participant);
+      }
+
+      const allocationMap = new Map(
+        input.sessionState.allocations.map((allocation) => [
+          allocation.participant.toLowerCase(),
+          toUnits(allocation.amount, this.assetDecimals),
+        ])
+      );
+
+      const payerKey = payer.toLowerCase();
+      const payeeKey = payee.toLowerCase();
+      canonicalParticipants.set(payeeKey, payee);
+      const payerBalance = allocationMap.get(payerKey) ?? 0n;
+      if (payerBalance < amountUnits) {
+        throw new Error('Insufficient session balance for transfer');
+      }
+
+      allocationMap.set(payerKey, payerBalance - amountUnits);
+      allocationMap.set(payeeKey, (allocationMap.get(payeeKey) ?? 0n) + amountUnits);
+
+      const newAllocations = Array.from(allocationMap.entries()).map(([participant, amount]) => ({
+        asset: this.assetSymbol as string,
+        amount: fromUnits(amount, this.assetDecimals),
+        participant: (canonicalParticipants.get(participant) ?? participant) as Address,
+      }));
+
+      const version = input.sessionState.version + 1;
+      const message = await createSubmitAppStateMessage(this.sessionSigner, {
+        app_session_id: input.sessionState.sessionId as Hex,
+        intent: RPCAppStateIntent.Operate,
+        version,
+        allocations: newAllocations,
+        session_data: JSON.stringify({ paymentEventId: input.event.id, workOrderId: input.workOrderId }),
       });
+
       const response = await this.rpc.send(message);
       if (getMethod(response as any) === 'error' || response.err) {
-        const errResult = (getResult(response as any) ?? response.res?.[2]) as any;
-        throw new Error(`Yellow transfer failed: ${errResult?.error ?? 'unknown error'}`);
+        const errResult = (getResult(response as any) ?? response.err?.[2] ?? response.res?.[2]) as any;
+        const err = errResult?.error ? `: ${errResult.error}` : '';
+        throw new Error(`Yellow transfer failed${err}`);
       }
+
       const result = (getResult(response as any) ?? response.res?.[2]) as any;
       return {
-        transferId: String(result?.transactions?.[0]?.id ?? randomUUID()),
-        sessionState: null,
+        transferId: String(result?.version ?? randomUUID()),
+        sessionState: {
+          ...input.sessionState,
+          allocations: Array.from(allocationMap.entries()).map(([participant, amount]) => ({
+            participant: canonicalParticipants.get(participant) ?? participant,
+            amount: fromUnits(amount, this.assetDecimals),
+          })),
+          version,
+        },
       };
-    }
-
-    const payer = input.sessionState.participants[0];
-    const payee = input.event.toAddress;
-    const amountUnits = toUnits(input.event.amount, this.assetDecimals);
-
-    // Preserve the original-cased participant addresses, because the server treats
-    // participant strings as exact identifiers (checksum casing matters).
-    const canonicalParticipants = new Map<string, string>();
-    for (const participant of input.sessionState.participants) {
-      canonicalParticipants.set(participant.toLowerCase(), participant);
-    }
-
-    const allocationMap = new Map(
-      input.sessionState.allocations.map((allocation) => [
-        allocation.participant.toLowerCase(),
-        toUnits(allocation.amount, this.assetDecimals),
-      ])
-    );
-
-    const payerKey = payer.toLowerCase();
-    const payeeKey = payee.toLowerCase();
-    canonicalParticipants.set(payeeKey, payee);
-    const payerBalance = allocationMap.get(payerKey) ?? 0n;
-    if (payerBalance < amountUnits) {
-      throw new Error('Insufficient session balance for transfer');
-    }
-
-    allocationMap.set(payerKey, payerBalance - amountUnits);
-    allocationMap.set(payeeKey, (allocationMap.get(payeeKey) ?? 0n) + amountUnits);
-
-    const newAllocations = Array.from(allocationMap.entries()).map(([participant, amount]) => ({
-      asset: this.assetSymbol as string,
-      amount: fromUnits(amount, this.assetDecimals),
-      participant: (canonicalParticipants.get(participant) ?? participant) as Address,
-    }));
-
-    const version = input.sessionState.version + 1;
-    const message = await createSubmitAppStateMessage(this.sessionSigner, {
-      app_session_id: input.sessionState.sessionId as Hex,
-      intent: RPCAppStateIntent.Operate,
-      version,
-      allocations: newAllocations,
-      session_data: JSON.stringify({ paymentEventId: input.event.id, workOrderId: input.workOrderId }),
     });
-
-    const response = await this.rpc.send(message);
-    if (getMethod(response as any) === 'error' || response.err) {
-      const errResult = (getResult(response as any) ?? response.err?.[2] ?? response.res?.[2]) as any;
-      const err = errResult?.error ? `: ${errResult.error}` : '';
-      throw new Error(`Yellow transfer failed${err}`);
-    }
-
-    const result = (getResult(response as any) ?? response.res?.[2]) as any;
-    return {
-      transferId: String(result?.version ?? randomUUID()),
-      sessionState: {
-        ...input.sessionState,
-        allocations: Array.from(allocationMap.entries()).map(([participant, amount]) => ({
-          participant: canonicalParticipants.get(participant) ?? participant,
-          amount: fromUnits(amount, this.assetDecimals),
-        })),
-        version,
-      },
-    };
   }
 
   async closeSession(input: { workOrderId: string; sessionState: YellowSessionState }) {
@@ -561,43 +596,45 @@ export class YellowClient {
       };
     }
 
-    await this.initReal(input.sessionState.allowanceTotal);
+    return this.withAuthRetry(async () => {
+      await this.initReal(input.sessionState.allowanceTotal);
 
-    if (!this.rpc || !this.sessionSigner || !this.assetSymbol) {
-      throw new Error('Yellow client not initialized');
-    }
+      if (!this.rpc || !this.sessionSigner || !this.assetSymbol) {
+        throw new Error('Yellow client not initialized');
+      }
 
-    const allocations = input.sessionState.allocations.map((allocation) => ({
-      asset: this.assetSymbol as string,
-      amount: allocation.amount,
-      participant: allocation.participant as Address,
-    }));
+      const allocations = input.sessionState.allocations.map((allocation) => ({
+        asset: this.assetSymbol as string,
+        amount: allocation.amount,
+        participant: allocation.participant as Address,
+      }));
 
-    const message = await createCloseAppSessionMessage(this.sessionSigner, {
-      app_session_id: input.sessionState.sessionId as Hex,
-      allocations,
-      session_data: JSON.stringify({ workOrderId: input.workOrderId }),
+      const message = await createCloseAppSessionMessage(this.sessionSigner, {
+        app_session_id: input.sessionState.sessionId as Hex,
+        allocations,
+        session_data: JSON.stringify({ workOrderId: input.workOrderId }),
+      });
+
+      const response = await this.rpc.send(message);
+      if (getMethod(response as any) === 'error' || response.err) {
+        const errResult = (getResult(response as any) ?? response.res?.[2]) as any;
+        throw new Error(`Yellow close session failed: ${errResult?.error ?? 'unknown error'}`);
+      }
+
+      if (process.env.YELLOW_ENABLE_CHANNELS === 'true' && this.channelId) {
+        const closeMessage = await createCloseChannelMessage(
+          this.sessionSigner,
+          this.channelId,
+          (this.walletAddress ?? '0x0000000000000000000000000000000000000000') as Address
+        );
+        await this.rpc.send(closeMessage);
+      }
+
+      return {
+        settlementTxId: randomUUID(),
+        workOrderId: input.workOrderId,
+        apiUrl: this.apiUrl ?? null,
+      };
     });
-
-    const response = await this.rpc.send(message);
-    if (getMethod(response as any) === 'error' || response.err) {
-      const errResult = (getResult(response as any) ?? response.res?.[2]) as any;
-      throw new Error(`Yellow close session failed: ${errResult?.error ?? 'unknown error'}`);
-    }
-
-    if (process.env.YELLOW_ENABLE_CHANNELS === 'true' && this.channelId) {
-      const closeMessage = await createCloseChannelMessage(
-        this.sessionSigner,
-        this.channelId,
-        (this.walletAddress ?? '0x0000000000000000000000000000000000000000') as Address
-      );
-      await this.rpc.send(closeMessage);
-    }
-
-    return {
-      settlementTxId: randomUUID(),
-      workOrderId: input.workOrderId,
-      apiUrl: this.apiUrl ?? null,
-    };
   }
 }

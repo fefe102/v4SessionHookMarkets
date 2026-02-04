@@ -23,7 +23,8 @@ pnpm install
 pnpm demo:up
 ```
 
-Open http://localhost:3000, create a work order, and watch quotes + verification events flow through.
+Open the Web UI (default: http://localhost:3000), create a work order, and watch quotes + verification events flow through.
+If those ports are already in use, `pnpm demo:up` will print the actual URLs it started on.
 
 Notes:
 - The API auto-selects the best quote after the bidding window closes, or you can call `POST /work-orders/:id/select`.

@@ -119,6 +119,15 @@ const env: NodeJS.ProcessEnv = { ...process.env, ...dotEnv };
 const pollMs = env.BOT_POLL_MS ? Number(env.BOT_POLL_MS) : 5000;
 if (!env.BOT_POLL_MS) env.BOT_POLL_MS = String(pollMs);
 
+function setIfMissing(key: string, value: string) {
+  const current = env[key];
+  if (typeof current !== 'string' || current.trim() === '') {
+    env[key] = value;
+    return true;
+  }
+  return false;
+}
+
 function parseNodeMajor(version: string) {
   const cleaned = version.trim().replace(/^v/, '');
   const major = Number(cleaned.split('.')[0]);
@@ -190,6 +199,23 @@ process.on('SIGTERM', () => {
 async function main() {
   if (useVoltaForChildren) {
     console.log(`INFO: pnpm is running with Node ${pnpmNodeMajor}; using Volta Node ${demoNodeVersion} for child processes`);
+  }
+
+  const demoDefaults: string[] = [];
+  if (setIfMissing('YELLOW_MILESTONE_SPLITS', '5')) demoDefaults.push('YELLOW_MILESTONE_SPLITS=5');
+  if (setIfMissing('V4_AGENT_STEPS', '5')) demoDefaults.push('V4_AGENT_STEPS=5');
+  if (setIfMissing('V4SHM_DEMO_ACTIONS', 'true')) demoDefaults.push('V4SHM_DEMO_ACTIONS=true');
+  if (demoDefaults.length > 0) {
+    console.log(`INFO: using demo defaults (${demoDefaults.join(', ')})`);
+  }
+
+  if (env.VERIFIER_MODE === 'real') {
+    const v4CoreRoot = path.join(repoRoot, 'harness', 'v4-hook-harness', 'lib', 'v4-core');
+    const forgeStdSrc = path.join(v4CoreRoot, 'lib', 'forge-std', 'src');
+    const solmateSrc = path.join(v4CoreRoot, 'lib', 'solmate', 'src');
+    if (!fs.existsSync(forgeStdSrc) || !fs.existsSync(solmateSrc)) {
+      console.log('WARN: verifier is in real mode, but harness deps are missing. Run `pnpm harness:install`.');
+    }
   }
 
   const reservedPorts = new Set<number>();

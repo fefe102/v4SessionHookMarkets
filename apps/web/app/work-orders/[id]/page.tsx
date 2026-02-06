@@ -1,6 +1,8 @@
 import Link from 'next/link';
 import { fetchJson } from '../../../lib/api';
+import LiveRefresher from './LiveRefresher';
 import EndSessionButton from '../../components/EndSessionButton';
+import SelectBestQuoteButton from '../../components/SelectBestQuoteButton';
 import type { WorkOrder, QuotePayload, SubmissionPayload, PaymentEvent, VerificationReport } from '@v4shm/shared';
 
 export default async function WorkOrderPage({ params }: { params: { id: string } }) {
@@ -55,6 +57,7 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
         <Link href="/" className="button secondary">Back</Link>
         <h1>{workOrder.title}</h1>
         <p>{workOrder.id}</p>
+        <LiveRefresher workOrderId={workOrder.id} />
       </header>
 
       <section className="grid two">
@@ -64,6 +67,14 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
           <p>Template: {workOrder.templateType}</p>
           <p>Bounty: {workOrder.bounty.amount} {workOrder.bounty.currency}</p>
           <p>Bidding ends: {new Date(workOrder.bidding.biddingEndsAt).toLocaleTimeString()}</p>
+          {workOrder.status === 'BIDDING' ? (
+            <div className="section">
+              <SelectBestQuoteButton
+                workOrderId={workOrder.id}
+                biddingEndsAt={workOrder.bidding.biddingEndsAt}
+              />
+            </div>
+          ) : null}
           <p>Challenge: {workOrder.challenge?.status ?? 'n/a'}</p>
           {workOrder.deadlines?.challengeEndsAt ? (
             <p>Challenge ends: {new Date(workOrder.deadlines.challengeEndsAt).toLocaleTimeString()}</p>

@@ -259,7 +259,7 @@ export async function runVerification(input: {
       logs: {
         buildLog: '',
         testLog: '',
-        verifierStdout: 'Missing v4-core dependency. Run `forge install --no-git uniswap/v4-core` and init submodules.',
+        verifierStdout: 'Missing v4-core dependency. From `harness/v4-hook-harness`: run `forge install uniswap/v4-core --no-commit` then `git -C lib/v4-core submodule update --init --recursive`.',
       },
       proof: {
         chainId: Number(process.env.V4_CHAIN_ID ?? 84532),
@@ -589,7 +589,7 @@ export async function runChallenge(input: {
 
   const v4CorePath = path.join(harnessDir, 'lib', 'v4-core');
   if (!fs.existsSync(v4CorePath)) {
-    throw new Error('Missing v4-core dependency. Run `forge install --no-git uniswap/v4-core` and init submodules.');
+    throw new Error('Missing v4-core dependency. From `harness/v4-hook-harness`: run `forge install uniswap/v4-core --no-commit` then `git -C lib/v4-core submodule update --init --recursive`.');
   }
 
   const repro = (input.challenge.reproductionSpec ?? {}) as Record<string, unknown>;

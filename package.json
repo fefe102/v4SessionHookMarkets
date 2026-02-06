@@ -8,6 +8,8 @@
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "fund:sepolia": "tsx scripts/fund-base-sepolia.ts",
+    "harness:check": "tsx scripts/check-harness.ts",
+    "harness:install": "tsx scripts/install-harness.ts",
     "demo:check": "tsx scripts/check-demo.ts",
     "demo:up": "tsx scripts/demo-up.ts"
   },

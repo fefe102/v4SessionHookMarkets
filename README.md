@@ -76,8 +76,12 @@ curl -sS -X POST https://clearnet-sandbox.yellow.com/faucet/requestTokens \
 3) Install harness deps once:
 
 ```bash
+# From repo root (recommended helper):
+pnpm harness:install
+
+# Or manually:
 cd harness/v4-hook-harness
-forge install --no-git uniswap/v4-core
+forge install uniswap/v4-core --no-commit
 git -C lib/v4-core submodule update --init --recursive
 ```
 

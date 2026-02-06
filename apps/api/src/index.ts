@@ -595,7 +595,10 @@ server.get('/work-orders/:id/verification', async (request, reply) => {
 
 server.post('/work-orders/:id/select', async (request, reply) => {
   const { id } = request.params as { id: string };
-  const body = request.body as { quoteId?: string } | undefined;
+  const body = request.body as { quoteId?: string; force?: boolean } | undefined;
+  const { force } = (request.query as { force?: string }) ?? {};
+  const forceSelect = body?.force === true || force === 'true';
+  const allowForceSelect = process.env.V4SHM_DEMO_ACTIONS === 'true';
 
   const record = db.getWorkOrder(id);
   if (!record) return reply.status(404).send({ error: 'Work order not found' });
@@ -606,7 +609,13 @@ server.post('/work-orders/:id/select', async (request, reply) => {
   }
 
   if (workOrder.status === 'BIDDING' && Date.now() < workOrder.bidding.biddingEndsAt) {
-    return reply.status(400).send({ error: 'Bidding window still open' });
+    if (!forceSelect) {
+      return reply.status(400).send({ error: 'Bidding window still open. Use ?force=true to select early.' });
+    }
+    if (!allowForceSelect) {
+      return reply.status(400).send({ error: 'Force select disabled (set V4SHM_DEMO_ACTIONS=true)' });
+    }
+    workOrder.bidding.biddingEndsAt = Date.now();
   }
 
   const quotes = db.listQuotes(id).map((q) => q.payload as QuotePayload);

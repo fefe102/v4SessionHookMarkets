@@ -1,10 +1,12 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
 
 export default function CreateWorkOrderForm() {
+  const router = useRouter();
   const [title, setTitle] = useState('Swap cap demo');
   const [templateType, setTemplateType] = useState<'SWAP_CAP_HOOK' | 'WHITELIST_HOOK'>('SWAP_CAP_HOOK');
   const [bounty, setBounty] = useState('10');
@@ -39,6 +41,8 @@ export default function CreateWorkOrderForm() {
 
     const data = await res.json();
     setStatus(`Created work order ${data.id}`);
+    router.push(`/work-orders/${data.id}`);
+    router.refresh();
   }
 
   return (

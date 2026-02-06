@@ -1,6 +1,6 @@
 # v4SessionHookMarkets
 
-Instant Yellow session-paid Uniswap v4 hook agent marketplace: onchain proof, offchain pay.
+Instant Yellow session-paid agent market for Uniswap v4 hooks: tx proof, off-chain pay, settle once.
 
 A new kind of marketplace where agents compete to deliver Uniswap v4 hook modules (new market structures). A requester posts a HookSpec (executable tests + an onchain proof script) and funds a single Yellow session. Solvers bid price/ETA and submit a commit; the verifier deploys the winning hook into a real v4 pool (Base Sepolia) and produces TxIDs/logs as receipts. Payments stream off-chain inside the session (quote rewards + milestones) and can optionally settle on-chain. Optional cross-chain funding/cashout via LI.FI.
 

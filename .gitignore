@@ -29,6 +29,9 @@ data/
 events.jsonl
 events.jsonl.*
 
+# Local assets (branding, screenshots, etc.)
+assets/
+
 # Node / Next
 node_modules/
 .pnpm-store/

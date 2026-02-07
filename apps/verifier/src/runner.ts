@@ -189,6 +189,17 @@ function writeReport(report: VerificationReport) {
   );
 }
 
+function extractTxHashesFromForgeOutput(output: string): string[] {
+  const matches: string[] = [];
+  const re = /"(?:tx_hash|txHash|transactionHash)"\s*:\s*"(0x[a-fA-F0-9]{64})"/g;
+  for (;;) {
+    const match = re.exec(output);
+    if (!match) break;
+    matches.push(match[1]);
+  }
+  return matches;
+}
+
 export async function runVerification(input: {
   workOrder: WorkOrder;
   submission: SubmissionPayload;
@@ -469,6 +480,7 @@ export async function runVerification(input: {
         'script',
         'script/V4NegativeProof.s.sol:V4NegativeProof',
         '--broadcast',
+        '--skip-simulation',
         '--rpc-url',
         rpcUrl,
         '--private-key',
@@ -484,13 +496,24 @@ export async function runVerification(input: {
     const broadcastPath = path.join(harnessDir, 'broadcast', 'V4NegativeProof.s.sol', String(chainId), 'run-latest.json');
     const fallbackPath = path.join(harnessDir, 'broadcast', 'V4NegativeProof.s.sol', String(chainId), 'dry-run', 'run-latest.json');
     const runPath = fs.existsSync(broadcastPath) ? broadcastPath : fallbackPath;
+
+    const hashes: string[] = [];
     if (fs.existsSync(runPath)) {
       const parsed = JSON.parse(fs.readFileSync(runPath, 'utf8'));
-      const hashes: string[] = (parsed.transactions ?? parsed.receipts ?? [])
-        .map((tx: any) => tx.hash ?? tx.transactionHash)
-        .filter((hash: string | undefined) => !!hash);
-      negativeTx = hashes.at(-1) ?? null;
+      hashes.push(
+        ...(parsed.transactions ?? parsed.receipts ?? [])
+          .map((tx: any) => tx.hash ?? tx.transactionHash)
+          .filter((hash: string | undefined) => !!hash)
+      );
     }
+
+    // If Foundry doesn't emit a broadcast artifact (e.g. due to exit code on revert),
+    // fall back to parsing `--json` stdout for tx hashes.
+    if (hashes.length === 0) {
+      hashes.push(...extractTxHashesFromForgeOutput(negative.output));
+    }
+
+    negativeTx = hashes.at(-1) ?? null;
 
     if (!negativeTx) {
       throw new Error(`Unable to locate negative swap tx hash. forge ok=${negative.ok}`);

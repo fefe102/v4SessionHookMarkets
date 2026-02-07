@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { API_BASE } from '../../../lib/api';
 
 type LiveState = 'connecting' | 'live' | 'reconnecting' | 'offline';
+type FlashKind = 'success' | 'fail' | 'milestone';
 
 function toWsBaseUrl(apiBase: string) {
   const trimmed = apiBase.trim();
@@ -16,6 +17,7 @@ function toWsBaseUrl(apiBase: string) {
 export default function LiveRefresher({ workOrderId }: { workOrderId: string }) {
   const router = useRouter();
   const [state, setState] = useState<LiveState>('connecting');
+  const [flash, setFlash] = useState<{ id: number; kind: FlashKind } | null>(null);
   const refreshScheduled = useRef(false);
   const reconnectAttempt = useRef(0);
   const closing = useRef(false);
@@ -39,6 +41,14 @@ export default function LiveRefresher({ workOrderId }: { workOrderId: string }) 
       }, 250);
     }
 
+    function triggerFlash(kind: FlashKind) {
+      const id = Date.now() + Math.random();
+      setFlash({ id, kind });
+      window.setTimeout(() => {
+        setFlash((current) => (current?.id === id ? null : current));
+      }, 900);
+    }
+
     function connect() {
       if (closing.current) return;
       setState((prev) => (prev === 'connecting' ? 'connecting' : 'reconnecting'));
@@ -54,7 +64,22 @@ export default function LiveRefresher({ workOrderId }: { workOrderId: string }) 
         if (didInitialConnect.current) scheduleRefresh();
         didInitialConnect.current = true;
       };
-      ws.onmessage = () => scheduleRefresh();
+      ws.onmessage = (event) => {
+        scheduleRefresh();
+        try {
+          const parsed = JSON.parse(String((event as MessageEvent).data ?? ''));
+          const type = String(parsed?.type ?? '');
+          if (type === 'verificationPassed' || type === 'workOrderCompleted') {
+            triggerFlash('success');
+          } else if (type === 'verificationFailed' || type === 'workOrderExpired' || type === 'challengeSucceeded') {
+            triggerFlash('fail');
+          } else if (type === 'milestonePaid' || type === 'quoteRewardPaid' || type === 'challengeRewardPaid') {
+            triggerFlash('milestone');
+          }
+        } catch {
+          // ignore malformed WS messages
+        }
+      };
       ws.onerror = () => {
         // Most errors are followed by an onclose; avoid double-handling.
       };
@@ -82,9 +107,22 @@ export default function LiveRefresher({ workOrderId }: { workOrderId: string }) 
     };
   }, [router, workOrderId]);
 
+  const flashEmoji = flash?.kind === 'success'
+    ? '🎉'
+    : flash?.kind === 'fail'
+      ? '💥'
+      : flash?.kind === 'milestone'
+        ? '✨'
+        : null;
+
   return (
-    <span className="badge" title="Auto-refreshes on API websocket events">
+    <span className="badge live-badge" title="Auto-refreshes on API websocket events">
       Live: {state}
+      {flashEmoji ? (
+        <span key={flash?.id} className={`emoji-flash ${flash?.kind ?? ''}`} aria-hidden="true">
+          {flashEmoji}
+        </span>
+      ) : null}
     </span>
   );
 }

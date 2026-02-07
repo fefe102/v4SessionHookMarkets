@@ -124,6 +124,50 @@ p {
   font-weight: 600;
 }
 
+.badge-success {
+  background: #e7f8ee;
+  color: #146c2e;
+}
+
+.badge-fail {
+  background: #ffecef;
+  color: #b42318;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.live-badge {
+  position: relative;
+}
+
+.emoji-flash {
+  position: absolute;
+  right: -14px;
+  top: -14px;
+  font-size: 1.1rem;
+  pointer-events: none;
+  animation: emoji-pop 900ms ease-out both;
+}
+
+@keyframes emoji-pop {
+  0% {
+    transform: translateY(8px) scale(0.7);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-18px) scale(1.25);
+    opacity: 0;
+  }
+}
+
 @media (min-width: 900px) {
   .grid.two {
     grid-template-columns: repeat(2, minmax(0, 1fr));

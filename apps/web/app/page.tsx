@@ -3,13 +3,27 @@ import CreateWorkOrderForm from './components/CreateWorkOrderForm';
 import { fetchJson } from '../lib/api';
 import type { WorkOrder } from '@v4shm/shared';
 
-export default async function HomePage() {
+function parsePage(value: string | string[] | undefined): number {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const parsed = raw ? Number(raw) : 1;
+  if (!Number.isFinite(parsed) || parsed < 1) return 1;
+  return Math.floor(parsed);
+}
+
+export default async function HomePage({ searchParams }: { searchParams?: { page?: string | string[] } }) {
   let workOrders: WorkOrder[] = [];
   try {
     workOrders = await fetchJson<WorkOrder[]>('/work-orders');
   } catch (err) {
     // ignore fetch errors for empty demo
   }
+
+  const pageSize = 10;
+  const page = parsePage(searchParams?.page);
+  const totalPages = Math.max(1, Math.ceil(workOrders.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const offset = (safePage - 1) * pageSize;
+  const pageOrders = workOrders.slice(offset, offset + pageSize);
 
   return (
     <>
@@ -34,16 +48,33 @@ export default async function HomePage() {
           {workOrders.length === 0 ? (
             <p>No work orders yet. Create one to kick off agent quotes and verification.</p>
           ) : (
-            <div className="grid">
-              {workOrders.map((order) => (
+            <>
+              <div className="grid">
+                {pageOrders.map((order) => (
                 <Link key={order.id} href={`/work-orders/${order.id}`} className="card">
                   <span className="badge">{order.status}</span>
                   <h3>{order.title}</h3>
                   <p>Template: {order.templateType}</p>
                   <p>Bounty: {order.bounty.amount} {order.bounty.currency}</p>
                 </Link>
-              ))}
-            </div>
+                ))}
+              </div>
+              {totalPages > 1 ? (
+                <div className="pager">
+                  {safePage > 1 ? (
+                    <Link className="button secondary" href={`/?page=${safePage - 1}`}>
+                      Page {safePage - 1}
+                    </Link>
+                  ) : null}
+                  <span className="badge">Page {safePage} / {totalPages}</span>
+                  {safePage < totalPages ? (
+                    <Link className="button secondary" href={`/?page=${safePage + 1}`}>
+                      Page {safePage + 1}
+                    </Link>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
           )}
         </div>
       </section>

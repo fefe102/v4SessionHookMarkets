@@ -3,6 +3,7 @@ import { fetchJson } from '../../../lib/api';
 import LiveRefresher from './LiveRefresher';
 import EndSessionButton from '../../components/EndSessionButton';
 import SelectBestQuoteButton from '../../components/SelectBestQuoteButton';
+import SelectQuoteButton from '../../components/SelectQuoteButton';
 import type { WorkOrder, QuotePayload, SubmissionPayload, PaymentEvent, VerificationReport } from '@v4shm/shared';
 
 function formatQuotePrice(amount: string, currency: string) {
@@ -161,6 +162,13 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
                       {' '}· ETA to finish: {formatEtaMinutes(quote.etaMinutes)}
                     </p>
                     <p>Reputation: {tier.emoji} {tier.label}{score > 0 ? ` (${score})` : ''}</p>
+                    {workOrder.status === 'BIDDING' ? (
+                      <SelectQuoteButton
+                        workOrderId={workOrder.id}
+                        quoteId={quote.id}
+                        biddingEndsAt={workOrder.bidding.biddingEndsAt}
+                      />
+                    ) : null}
                     {quote.id === workOrder.selection.selectedQuoteId ? <p className="badge">Selected</p> : null}
                   </div>
                 );
@@ -188,7 +196,9 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
           <h3>Verification Report</h3>
           {report ? (
             <>
-              <p>Status: {report.status}</p>
+              <p>
+                Status: <span className={`badge ${report.status === 'PASS' ? 'badge-success' : 'badge-fail'}`}>{report.status}</span>
+              </p>
               <p>Hook: {report.proof.hookAddress}</p>
               <p>Pool ID: {report.proof.poolId.slice(0, 10)}...</p>
               <p>TxIDs: {report.proof.txIds.length}</p>

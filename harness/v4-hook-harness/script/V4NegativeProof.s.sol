@@ -16,6 +16,10 @@ contract NegativeSwapProbe {
 
     address public immutable swapTest;
 
+    bytes4 private constant ERROR_STRING_SELECTOR = 0x08c379a0;
+    // v4-core wraps hook call reverts using CustomRevert.WrappedError (ERC-7751 style).
+    bytes4 private constant WRAPPED_ERROR_SELECTOR = bytes4(keccak256("WrappedError(address,bytes4,bytes,bytes)"));
+
     constructor(address swapTestAddress, address currency0, address currency1) {
         swapTest = swapTestAddress;
         IERC20Minimal(currency0).approve(swapTestAddress, type(uint256).max);
@@ -44,15 +48,27 @@ contract NegativeSwapProbe {
         }
 
         // Error(string)
-        if (selector == 0x08c379a0 && revertData.length >= 4 + 32 + 32) {
-            bytes memory sliced = new bytes(revertData.length - 4);
-            for (uint256 i = 4; i < revertData.length; i++) {
-                sliced[i - 4] = revertData[i];
-            }
-            return abi.decode(sliced, (string));
+        if (selector == ERROR_STRING_SELECTOR && revertData.length >= 4 + 32 + 32) {
+            return abi.decode(_slice(revertData, 4), (string));
+        }
+
+        // CustomRevert.WrappedError(address target, bytes4 selector, bytes reason, bytes details)
+        // Unwrap and decode the inner `reason` recursively (often Error(string)).
+        if (selector == WRAPPED_ERROR_SELECTOR && revertData.length >= 4 + 32 * 4) {
+            (, , bytes memory reason,) = abi.decode(_slice(revertData, 4), (address, bytes4, bytes, bytes));
+            return _decodeRevertString(reason);
         }
 
         return "";
+    }
+
+    function _slice(bytes memory data, uint256 start) internal pure returns (bytes memory) {
+        if (start >= data.length) return new bytes(0);
+        bytes memory out = new bytes(data.length - start);
+        for (uint256 i = start; i < data.length; i++) {
+            out[i - start] = data[i];
+        }
+        return out;
     }
 }
 

@@ -28,7 +28,7 @@ export default async function LiFiPage() {
     <>
       <header>
         <Link href="/" className="button secondary">Back</Link>
-        <h1>LI.FI (Optional Prize)</h1>
+        <h1>LI.FI Prize</h1>
         <p>Bridge/swap cross-chain to fund the requester or cash out to another chain.</p>
       </header>
 
@@ -55,4 +55,3 @@ export default async function LiFiPage() {
     </>
   );
 }
-

@@ -50,9 +50,9 @@ export default async function HomePage() {
 
       <section className="section grid two">
         <Link href="/lifi" className="card">
-          <span className="badge">Optional</span>
+          <span className="badge">Prize</span>
           <h3>LI.FI Bridge / Swap</h3>
-          <p>Cross-chain funding and cash-out (optional prize).</p>
+          <p>Cross-chain funding and cash-out (LI.FI prize).</p>
         </Link>
         <div className="card">
           <h3>Demo Tips</h3>

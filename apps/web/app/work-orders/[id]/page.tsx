@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { fetchJson } from '../../../lib/api';
 import LiveRefresher from './LiveRefresher';
 import AutoPickQuote from './AutoPickQuote';
+import ReportBurst from './ReportBurst';
 import EndSessionButton from '../../components/EndSessionButton';
 import SelectBestQuoteButton from '../../components/SelectBestQuoteButton';
 import SelectQuoteButton from '../../components/SelectQuoteButton';
@@ -210,6 +211,7 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
           <h3>Verification Report</h3>
           {report ? (
             <>
+              <ReportBurst status={report.status} />
               <p>
                 Status: <span className={`badge ${report.status === 'PASS' ? 'badge-success' : 'badge-fail'}`}>{report.status}</span>
               </p>

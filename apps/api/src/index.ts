@@ -312,13 +312,61 @@ function hasPaymentEvent(workOrderId: string, predicate: (evt: PaymentEvent) => 
   return events.some(predicate);
 }
 
+function parseYellowVersionMismatch(message: string): { expected: number; got: number } | null {
+  const match = message.match(/expected\s+(\d+),\s+got\s+(\d+)/i);
+  if (!match) return null;
+  const expected = Number(match[1]);
+  const got = Number(match[2]);
+  if (!Number.isFinite(expected) || !Number.isFinite(got)) return null;
+  return { expected, got };
+}
+
+function syncYellowStateFromDb(workOrder: WorkOrder): boolean {
+  const record = db.getWorkOrder(workOrder.id);
+  if (!record) return false;
+  const latest = normalizeWorkOrder(record.payload as WorkOrder);
+  workOrder.yellow = {
+    ...workOrder.yellow,
+    yellowSessionId: latest.yellow.yellowSessionId,
+    sessionAssetAddress: latest.yellow.sessionAssetAddress,
+    allowanceTotal: latest.yellow.allowanceTotal,
+    participants: latest.yellow.participants,
+    allocations: latest.yellow.allocations,
+    sessionVersion: latest.yellow.sessionVersion,
+    settlementTxId: latest.yellow.settlementTxId ?? workOrder.yellow.settlementTxId ?? null,
+  };
+  workOrder.requesterAddress = latest.requesterAddress ?? workOrder.requesterAddress ?? null;
+  return true;
+}
+
 async function recordPayment(workOrder: WorkOrder, paymentEvent: PaymentEvent) {
-  const transfer = await yellowClientForWorkOrder(workOrder).transfer({
-    workOrderId: workOrder.id,
-    event: paymentEvent,
-    sessionState: buildSessionState(workOrder),
-    allowanceTotal: workOrder.yellow.allowanceTotal,
-  });
+  async function attemptTransfer() {
+    return await yellowClientForWorkOrder(workOrder).transfer({
+      workOrderId: workOrder.id,
+      event: paymentEvent,
+      sessionState: buildSessionState(workOrder),
+      allowanceTotal: workOrder.yellow.allowanceTotal,
+    });
+  }
+
+  let transfer;
+  try {
+    transfer = await attemptTransfer();
+  } catch (err) {
+    const message = String((err as any)?.message ?? err);
+    const mismatch = parseYellowVersionMismatch(message);
+    if (mismatch && message.toLowerCase().includes('incorrect app state')) {
+      // Another request may have advanced the Yellow app-session version. Refresh from the DB and retry once.
+      if (syncYellowStateFromDb(workOrder)) {
+        transfer = await attemptTransfer();
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
+
   paymentEvent.yellowTransferId = transfer.transferId;
   applySessionState(workOrder, transfer.sessionState ?? null);
   persistWorkOrder(workOrder);
@@ -718,188 +766,191 @@ server.post('/work-orders/:id/submit', async (request, reply) => {
     return reply.status(400).send({ error: 'Work order ID mismatch' });
   }
 
-  const record = db.getWorkOrder(id);
-  if (!record) return reply.status(404).send({ error: 'Work order not found' });
-  const workOrder = normalizeWorkOrder(record.payload as WorkOrder);
+  const result = await queueWorkOrder(id, async () => {
+    const record = db.getWorkOrder(id);
+    if (!record) return { status: 404, body: { error: 'Work order not found' } };
+    const workOrder = normalizeWorkOrder(record.payload as WorkOrder);
 
-  const canSubmit =
-    workOrder.status === 'SELECTED'
-    || (workOrder.status === 'CHALLENGED' && workOrder.deadlines.patchEndsAt !== null && Date.now() <= workOrder.deadlines.patchEndsAt);
-  if (!canSubmit) {
-    return reply.status(400).send({ error: 'Work order is not ready for submission' });
-  }
+    const canSubmit =
+      workOrder.status === 'SELECTED'
+      || (workOrder.status === 'CHALLENGED' && workOrder.deadlines.patchEndsAt !== null && Date.now() <= workOrder.deadlines.patchEndsAt);
+    if (!canSubmit) {
+      return { status: 400, body: { error: 'Work order is not ready for submission' } };
+    }
 
-  if (workOrder.selection.selectedSolverId &&
-      getAddress(body.solverAddress) !== getAddress(workOrder.selection.selectedSolverId)) {
-    return reply.status(403).send({ error: 'Solver is not selected for this work order' });
-  }
+    if (workOrder.selection.selectedSolverId &&
+        getAddress(body.solverAddress) !== getAddress(workOrder.selection.selectedSolverId)) {
+      return { status: 403, body: { error: 'Solver is not selected for this work order' } };
+    }
 
-  const message: SubmissionMessage = {
-    workOrderId: body.workOrderId,
-    repoUrl: body.artifact.repoUrl,
-    commitSha: body.artifact.commitSha,
-    artifactHash: body.artifact.artifactHash,
-  };
-  const recovered = recoverSubmissionSigner(message, body.signature);
-  if (getAddress(recovered) !== getAddress(body.solverAddress)) {
-    return reply.status(400).send({ error: 'Invalid submission signature' });
-  }
+    const message: SubmissionMessage = {
+      workOrderId: body.workOrderId,
+      repoUrl: body.artifact.repoUrl,
+      commitSha: body.artifact.commitSha,
+      artifactHash: body.artifact.artifactHash,
+    };
+    const recovered = recoverSubmissionSigner(message, body.signature);
+    if (getAddress(recovered) !== getAddress(body.solverAddress)) {
+      return { status: 400, body: { error: 'Invalid submission signature' } };
+    }
 
-  const computedHash = sha256Hex(`${body.artifact.repoUrl}:${body.artifact.commitSha}`);
-  if (computedHash !== body.artifact.artifactHash) {
-    return reply.status(400).send({ error: 'Artifact hash mismatch' });
-  }
+    const computedHash = sha256Hex(`${body.artifact.repoUrl}:${body.artifact.commitSha}`);
+    if (computedHash !== body.artifact.artifactHash) {
+      return { status: 400, body: { error: 'Artifact hash mismatch' } };
+    }
 
-  db.insertSubmission({
-    id: body.id,
-    workOrderId: id,
-    createdAt: body.createdAt,
-    payload: body,
-  });
+    db.insertSubmission({
+      id: body.id,
+      workOrderId: id,
+      createdAt: body.createdAt,
+      payload: body,
+    });
 
-  workOrder.status = 'VERIFYING';
-  db.updateWorkOrder({
-    id: workOrder.id,
-    createdAt: workOrder.createdAt,
-    status: workOrder.status,
-    payload: workOrder,
-  });
-
-  emit(id, 'submissionReceived', body);
-
-  const verifierResponse = await fetch(`${VERIFIER_URL}/verify`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workOrder, submission: body }),
-  });
-
-  if (!verifierResponse.ok) {
-    const errorText = await verifierResponse.text();
-    workOrder.status = 'FAILED';
+    workOrder.status = 'VERIFYING';
     db.updateWorkOrder({
       id: workOrder.id,
       createdAt: workOrder.createdAt,
       status: workOrder.status,
       payload: workOrder,
     });
-    emit(id, 'verificationFailed', { error: errorText });
-    return reply.status(500).send({ error: 'Verifier failed', details: errorText });
-  }
 
-  const report = (await verifierResponse.json()) as {
-    report: any;
-    milestonesPassed: string[];
-  };
+    emit(id, 'submissionReceived', body);
 
-  db.insertVerificationReport({
-    id: report.report.id,
-    submissionId: body.id,
-    createdAt: report.report.producedAt,
-    status: report.report.status,
-    payload: report.report,
+    const verifierResponse = await fetch(`${VERIFIER_URL}/verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ workOrder, submission: body }),
+    });
+
+    if (!verifierResponse.ok) {
+      const errorText = await verifierResponse.text();
+      workOrder.status = 'FAILED';
+      db.updateWorkOrder({
+        id: workOrder.id,
+        createdAt: workOrder.createdAt,
+        status: workOrder.status,
+        payload: workOrder,
+      });
+      emit(id, 'verificationFailed', { error: errorText });
+      return { status: 500, body: { error: 'Verifier failed', details: errorText } };
+    }
+
+    const report = (await verifierResponse.json()) as {
+      report: any;
+      milestonesPassed: string[];
+    };
+
+    db.insertVerificationReport({
+      id: report.report.id,
+      submissionId: body.id,
+      createdAt: report.report.producedAt,
+      status: report.report.status,
+      payload: report.report,
+    });
+
+    workOrder.verification.verificationReportId = report.report.id;
+
+    const selectedQuoteId = workOrder.selection.selectedQuoteId;
+    const selectedQuote = selectedQuoteId
+      ? (db.listQuotes(workOrder.id).map((q) => q.payload as QuotePayload).find((q) => q.id === selectedQuoteId) ?? null)
+      : null;
+
+    if (report.report.status === 'PASS') {
+      const patched = workOrder.challenge.status === 'PATCH_WINDOW';
+      workOrder.status = 'PASSED_PENDING_CHALLENGE';
+      workOrder.challenge.status = patched ? 'PATCH_PASSED' : 'OPEN';
+      workOrder.challenge.pendingRewardAmount = null;
+      workOrder.deadlines.patchEndsAt = null;
+      workOrder.deadlines.challengeEndsAt = patched ? Date.now() : Date.now() + CHALLENGE_WINDOW_MS;
+      emit(id, 'verificationPassed', report.report);
+
+      if (selectedQuote) {
+        const stats = getSolverStats(selectedQuote.solverAddress);
+        stats.deliveriesSucceeded += 1;
+        const selectionTime = workOrder.selection.selectedAt ?? workOrder.createdAt;
+        const actualMinutes = Math.max(1, Math.ceil((Date.now() - selectionTime) / 60000));
+        stats.totalEtaMinutes += selectedQuote.etaMinutes;
+        stats.totalActualMinutes += actualMinutes;
+        if (workOrder.deadlines.deliveryEndsAt && Date.now() <= workOrder.deadlines.deliveryEndsAt) {
+          stats.onTimeDeliveries += 1;
+        }
+        saveSolverStats(stats);
+      }
+
+      // Pay milestones in order.
+      const basePrice = selectedQuote ? Number(selectedQuote.price) : Number(workOrder.bounty.amount);
+      for (const milestone of workOrder.milestones.payoutSchedule) {
+        if (!report.milestonesPassed.includes(milestone.key)) continue;
+        const targetAmount = ((basePrice * milestone.percent) / 100).toFixed(4);
+        const targetUnits = toUnits(targetAmount, YELLOW_ASSET.decimals);
+        const alreadyPaidUnits = totalPaidForMilestone(workOrder.id, milestone.key, body.solverAddress);
+        if (alreadyPaidUnits >= targetUnits) continue;
+
+        const remainingUnits = targetUnits - alreadyPaidUnits;
+        const splitCount = milestone.key === 'M5_NO_CHALLENGE_OR_PATCH_OK' ? 1 : MILESTONE_SPLITS;
+        for (const partUnits of splitUnits(remainingUnits, splitCount)) {
+          const paymentEvent: PaymentEvent = {
+            id: randomUUID(),
+            workOrderId: workOrder.id,
+            type: 'MILESTONE',
+            toAddress: body.solverAddress,
+            amount: fromUnits(partUnits, YELLOW_ASSET.decimals),
+            yellowTransferId: null,
+            milestoneKey: milestone.key,
+            createdAt: Date.now(),
+          };
+          await recordPayment(workOrder, paymentEvent);
+          emit(workOrder.id, 'milestonePaid', paymentEvent);
+        }
+      }
+    } else {
+      emit(id, 'verificationFailed', report.report);
+      if (workOrder.challenge.status === 'PATCH_WINDOW') {
+        await finalizeChallengeFailure(workOrder);
+        return { status: 200, body: { workOrder, report: report.report } };
+      }
+
+      if (selectedQuote) {
+        const stats = getSolverStats(selectedQuote.solverAddress);
+        stats.deliveriesFailed += 1;
+        saveSolverStats(stats);
+      }
+
+      const attempted = workOrder.selection.attemptedQuoteIds ?? [];
+      if (selectedQuoteId && !attempted.includes(selectedQuoteId)) {
+        attempted.push(selectedQuoteId);
+        workOrder.selection.attemptedQuoteIds = attempted;
+      }
+
+      const quotes = db.listQuotes(workOrder.id).map((q) => q.payload as QuotePayload);
+      try {
+        const session = await ensureYellowSession(workOrder, quotes);
+        emit(workOrder.id, 'yellowSessionCreated', session);
+      } catch (error) {
+        server.log.error(error, 'failed to ensure Yellow session for fallback selection');
+      }
+
+      const allowedSolvers = new Set(
+        (workOrder.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
+      );
+      const eligibleQuotes = allowedSolvers.size > 0
+        ? quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()))
+        : quotes;
+
+      const fallbackQuote = selectNextQuote(eligibleQuotes, attempted);
+      if (fallbackQuote) {
+        applySelection(workOrder, fallbackQuote);
+        emit(workOrder.id, 'solverFallbackSelected', { quote: fallbackQuote });
+      } else {
+        workOrder.status = 'FAILED';
+      }
+    }
+
+    persistWorkOrder(workOrder);
+    return { status: 200, body: { workOrder, report: report.report } };
   });
 
-  workOrder.verification.verificationReportId = report.report.id;
-
-  const selectedQuoteId = workOrder.selection.selectedQuoteId;
-  const selectedQuote = selectedQuoteId
-    ? (db.listQuotes(workOrder.id).map((q) => q.payload as QuotePayload).find((q) => q.id === selectedQuoteId) ?? null)
-    : null;
-
-  if (report.report.status === 'PASS') {
-    const patched = workOrder.challenge.status === 'PATCH_WINDOW';
-    workOrder.status = 'PASSED_PENDING_CHALLENGE';
-    workOrder.challenge.status = patched ? 'PATCH_PASSED' : 'OPEN';
-    workOrder.challenge.pendingRewardAmount = null;
-    workOrder.deadlines.patchEndsAt = null;
-    workOrder.deadlines.challengeEndsAt = patched ? Date.now() : Date.now() + CHALLENGE_WINDOW_MS;
-    emit(id, 'verificationPassed', report.report);
-
-    if (selectedQuote) {
-      const stats = getSolverStats(selectedQuote.solverAddress);
-      stats.deliveriesSucceeded += 1;
-      const selectionTime = workOrder.selection.selectedAt ?? workOrder.createdAt;
-      const actualMinutes = Math.max(1, Math.ceil((Date.now() - selectionTime) / 60000));
-      stats.totalEtaMinutes += selectedQuote.etaMinutes;
-      stats.totalActualMinutes += actualMinutes;
-      if (workOrder.deadlines.deliveryEndsAt && Date.now() <= workOrder.deadlines.deliveryEndsAt) {
-        stats.onTimeDeliveries += 1;
-      }
-      saveSolverStats(stats);
-    }
-
-    // Pay milestones in order.
-    const basePrice = selectedQuote ? Number(selectedQuote.price) : Number(workOrder.bounty.amount);
-    for (const milestone of workOrder.milestones.payoutSchedule) {
-      if (!report.milestonesPassed.includes(milestone.key)) continue;
-      const targetAmount = ((basePrice * milestone.percent) / 100).toFixed(4);
-      const targetUnits = toUnits(targetAmount, YELLOW_ASSET.decimals);
-      const alreadyPaidUnits = totalPaidForMilestone(workOrder.id, milestone.key, body.solverAddress);
-      if (alreadyPaidUnits >= targetUnits) continue;
-
-      const remainingUnits = targetUnits - alreadyPaidUnits;
-      const splitCount = milestone.key === 'M5_NO_CHALLENGE_OR_PATCH_OK' ? 1 : MILESTONE_SPLITS;
-      for (const partUnits of splitUnits(remainingUnits, splitCount)) {
-        const paymentEvent: PaymentEvent = {
-          id: randomUUID(),
-          workOrderId: workOrder.id,
-          type: 'MILESTONE',
-          toAddress: body.solverAddress,
-          amount: fromUnits(partUnits, YELLOW_ASSET.decimals),
-          yellowTransferId: null,
-          milestoneKey: milestone.key,
-          createdAt: Date.now(),
-        };
-        await recordPayment(workOrder, paymentEvent);
-        emit(workOrder.id, 'milestonePaid', paymentEvent);
-      }
-    }
-  } else {
-    emit(id, 'verificationFailed', report.report);
-    if (workOrder.challenge.status === 'PATCH_WINDOW') {
-      await finalizeChallengeFailure(workOrder);
-      return reply.status(200).send({ workOrder, report: report.report });
-    }
-
-    if (selectedQuote) {
-      const stats = getSolverStats(selectedQuote.solverAddress);
-      stats.deliveriesFailed += 1;
-      saveSolverStats(stats);
-    }
-
-    const attempted = workOrder.selection.attemptedQuoteIds ?? [];
-    if (selectedQuoteId && !attempted.includes(selectedQuoteId)) {
-      attempted.push(selectedQuoteId);
-      workOrder.selection.attemptedQuoteIds = attempted;
-    }
-
-    const quotes = db.listQuotes(workOrder.id).map((q) => q.payload as QuotePayload);
-    try {
-      const session = await ensureYellowSession(workOrder, quotes);
-      emit(workOrder.id, 'yellowSessionCreated', session);
-    } catch (error) {
-      server.log.error(error, 'failed to ensure Yellow session for fallback selection');
-    }
-
-    const allowedSolvers = new Set(
-      (workOrder.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
-    );
-    const eligibleQuotes = allowedSolvers.size > 0
-      ? quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()))
-      : quotes;
-
-    const fallbackQuote = selectNextQuote(eligibleQuotes, attempted);
-    if (fallbackQuote) {
-      applySelection(workOrder, fallbackQuote);
-      emit(workOrder.id, 'solverFallbackSelected', { quote: fallbackQuote });
-    } else {
-      workOrder.status = 'FAILED';
-    }
-  }
-
-  persistWorkOrder(workOrder);
-
-  return reply.status(200).send({ workOrder, report: report.report });
+  return reply.status(result.status).send(result.body);
 });
 
 server.post('/work-orders/:id/end-session', async (request, reply) => {

@@ -43,10 +43,10 @@ const EVENT_LOG_PATH = process.env.V4SHM_EVENT_LOG
 const API_URL = process.env.API_URL ?? 'http://localhost:3001';
 
 const yellowMode = process.env.YELLOW_MODE === 'real' ? 'real' : 'mock';
-const yellowClient = new YellowClient({
-  mode: yellowMode,
-  apiUrl: API_URL,
-});
+const yellowFallbackToMock = process.env.YELLOW_FALLBACK_TO_MOCK === 'true';
+const yellowClientReal = new YellowClient({ mode: 'real', apiUrl: API_URL });
+const yellowClientMock = new YellowClient({ mode: 'mock', apiUrl: API_URL });
+const yellowClient = yellowMode === 'real' ? yellowClientReal : yellowClientMock;
 
 const quietLogs = process.env.V4SHM_QUIET_LOGS === 'true';
 const server = Fastify({
@@ -241,16 +241,43 @@ async function ensureYellowSession(workOrder: WorkOrder, quotes: QuotePayload[])
   // Session allocations must cover both bounty payouts and quote rewards.
   const allocationTotal = allowanceTotal;
 
-  const session = await yellowClient.createSession({
-    workOrderId: workOrder.id,
-    allowanceTotal,
-    allocationTotal,
-    solverAddresses,
-    requesterAddress: workOrder.requesterAddress ?? undefined,
-  });
+  let session: YellowSessionState;
+  try {
+    session = await yellowClient.createSession({
+      workOrderId: workOrder.id,
+      allowanceTotal,
+      allocationTotal,
+      solverAddresses,
+      requesterAddress: workOrder.requesterAddress ?? undefined,
+    });
+  } catch (err) {
+    if (yellowMode === 'real' && yellowFallbackToMock) {
+      if (quietLogs) {
+        server.log.warn('Yellow session creation failed; falling back to mock mode for this work order');
+      } else {
+        server.log.warn({ err }, 'Yellow session creation failed; falling back to mock mode for this work order');
+      }
+      session = await yellowClientMock.createSession({
+        workOrderId: workOrder.id,
+        allowanceTotal,
+        allocationTotal,
+        solverAddresses,
+        requesterAddress: workOrder.requesterAddress ?? undefined,
+      });
+    } else {
+      throw err;
+    }
+  }
   applySessionState(workOrder, session);
   workOrder.requesterAddress = session.participants[0] ?? workOrder.requesterAddress ?? null;
   return session;
+}
+
+function yellowClientForWorkOrder(workOrder: WorkOrder) {
+  if (yellowMode !== 'real') return yellowClientMock;
+  const sessionId = workOrder.yellow.yellowSessionId ?? '';
+  if (sessionId.startsWith('yellow_mock_')) return yellowClientMock;
+  return yellowClientReal;
 }
 
 function applySelection(workOrder: WorkOrder, selectedQuote: QuotePayload) {
@@ -275,7 +302,7 @@ function hasPaymentEvent(workOrderId: string, predicate: (evt: PaymentEvent) => 
 }
 
 async function recordPayment(workOrder: WorkOrder, paymentEvent: PaymentEvent) {
-  const transfer = await yellowClient.transfer({
+  const transfer = await yellowClientForWorkOrder(workOrder).transfer({
     workOrderId: workOrder.id,
     event: paymentEvent,
     sessionState: buildSessionState(workOrder),
@@ -352,7 +379,7 @@ async function settleWorkOrder(workOrder: WorkOrder) {
 
   const sessionState = buildSessionState(workOrder);
   if (!sessionState) return null;
-  const result = await yellowClient.closeSession({ workOrderId: workOrder.id, sessionState });
+  const result = await yellowClientForWorkOrder(workOrder).closeSession({ workOrderId: workOrder.id, sessionState });
   workOrder.yellow.settlementTxId = result.settlementTxId;
   workOrder.status = 'COMPLETED';
   persistWorkOrder(workOrder);
@@ -1069,22 +1096,7 @@ server.post('/challenger/challenges', async (request, reply) => {
         milestoneKey: 'M5_NO_CHALLENGE_OR_PATCH_OK',
         createdAt: now,
       };
-      const transfer = await yellowClient.transfer({
-        workOrderId: workOrder.id,
-        event: paymentEvent,
-        sessionState: buildSessionState(workOrder),
-        allowanceTotal: workOrder.yellow.allowanceTotal,
-      });
-      paymentEvent.yellowTransferId = transfer.transferId;
-      applySessionState(workOrder, transfer.sessionState ?? null);
-      persistWorkOrder(workOrder);
-      db.insertPaymentEvent({
-        id: paymentEvent.id,
-        workOrderId: workOrder.id,
-        createdAt: paymentEvent.createdAt,
-        type: paymentEvent.type,
-        payload: paymentEvent,
-      });
+      await recordPayment(workOrder, paymentEvent);
       workOrder.status = 'FAILED';
       persistWorkOrder(workOrder);
       emit(workOrder.id, 'challengeSucceeded', { challenge: body, paymentEvent });

@@ -105,6 +105,7 @@ git -C lib/v4-core submodule update --init --recursive
 5) Run verifier + API as usual. The verifier will:
 - `forge build` + `forge test`
 - broadcast `script/V4Proof.s.sol` to Base Sepolia (includes a deterministic "agent loop" of swaps/liquidity ops; configure with `V4_AGENT_STEPS`)
+- broadcast `script/V4NegativeProof.s.sol` and append a negative-proof txid (emits `NegativeSwapOutcome(reverted, reason)`)
 - capture txids + proof JSON
 
 You can use `pnpm demo:up` in real mode too (it reads `.env`).

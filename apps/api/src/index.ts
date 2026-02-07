@@ -48,7 +48,8 @@ const yellowClient = new YellowClient({
   apiUrl: API_URL,
 });
 
-const server = Fastify({ logger: true });
+const quietLogs = process.env.V4SHM_QUIET_LOGS === 'true';
+const server = Fastify({ logger: true, disableRequestLogging: quietLogs });
 const db = createDb();
 const events = new EventBus(EVENT_LOG_PATH);
 
@@ -203,9 +204,9 @@ function normalizeWorkOrder(workOrder: WorkOrder): WorkOrder {
   };
 }
 
-function computeAllowanceTotal(workOrder: WorkOrder) {
-  return workOrder.yellow.allowanceTotal
-    ?? (Number(workOrder.bounty.amount) + QUOTE_REWARD * MAX_QUOTE_REWARDS).toFixed(2);
+function computeAllowanceTotal(workOrder: WorkOrder, quotes: QuotePayload[]) {
+  const solverCount = collectSessionSolversFromQuotes(quotes).length;
+  return (Number(workOrder.bounty.amount) + QUOTE_REWARD * solverCount).toFixed(2);
 }
 
 function collectSessionSolversFromQuotes(quotes: QuotePayload[]) {
@@ -231,7 +232,9 @@ async function ensureYellowSession(workOrder: WorkOrder, quotes: QuotePayload[])
     throw new Error('Cannot create Yellow session without any solver quotes');
   }
 
-  const allowanceTotal = computeAllowanceTotal(workOrder);
+  // Only reserve what we can actually spend: bounty + quote rewards for observed quotes.
+  // This keeps demo wallets usable and avoids locking MAX_QUOTE_REWARDS worth of funds.
+  const allowanceTotal = computeAllowanceTotal(workOrder, quotes);
   // Session allocations must cover both bounty payouts and quote rewards.
   const allocationTotal = allowanceTotal;
 
@@ -475,10 +478,6 @@ server.post('/work-orders', async (request, reply) => {
   const now = Date.now();
   const id = randomUUID();
   const status: WorkOrder['status'] = 'BIDDING';
-  const allowanceTotal = (
-    Number(body.bounty.amount) +
-    QUOTE_REWARD * MAX_QUOTE_REWARDS
-  ).toFixed(2);
 
   const workOrder: WorkOrder = {
     id,
@@ -516,7 +515,7 @@ server.post('/work-orders', async (request, reply) => {
     yellow: {
       yellowSessionId: null,
       sessionAssetAddress: YELLOW_ASSET.token,
-      allowanceTotal,
+      allowanceTotal: null,
       participants: undefined,
       allocations: undefined,
       sessionVersion: undefined,
@@ -629,7 +628,10 @@ server.post('/work-orders/:id/select', async (request, reply) => {
     await ensureQuoteRewardsPaid(workOrder, quotes);
   } catch (error) {
     server.log.error(error, 'failed to create Yellow session');
-    return reply.status(500).send({ error: 'Failed to create Yellow session' });
+    const details = process.env.V4SHM_DEMO_ACTIONS === 'true'
+      ? String((error as any)?.message ?? error)
+      : undefined;
+    return reply.status(500).send({ error: 'Failed to create Yellow session', details });
   }
 
   const allowedSolvers = new Set(

@@ -195,9 +195,21 @@ export class YellowClient {
             continue;
           }
           if (lower.includes('insufficient session key allowance')) {
-            // We reuse a single session key across many demo flows. If it runs out of allowance,
-            // increase the allowance and re-auth (requires sufficient funds on the Yellow ledger).
-            this.allowanceMultiplier = Math.min(this.allowanceMultiplier * 2, 1024);
+            // The Yellow sandbox can report "0 available" allowance for an otherwise valid session key.
+            // Rotating the session key and re-authing is the most reliable recovery (and is safe for
+            // already-created app sessions because signatures are tied to the wallet participant).
+            this.sessionPrivateKey = undefined;
+            this.sessionSigner = undefined;
+            this.allowanceMultiplier = 1;
+            this.resetSessionAuth();
+            continue;
+          }
+          if (lower.includes('session key') && lower.includes('expired')) {
+            // If Yellow considers the current session key expired, we can't re-auth it reliably.
+            // Rotate the session key and re-auth.
+            this.sessionPrivateKey = undefined;
+            this.sessionSigner = undefined;
+            this.allowanceMultiplier = 1;
             this.resetSessionAuth();
             continue;
           }

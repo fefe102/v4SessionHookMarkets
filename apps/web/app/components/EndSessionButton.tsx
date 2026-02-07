@@ -11,7 +11,6 @@ export default function EndSessionButton({ workOrderId }: { workOrderId: string 
     setStatus('Settling...');
     const res = await fetch(`${API_BASE}/work-orders/${workOrderId}/end-session?force=true`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
     });
 
     if (!res.ok) {

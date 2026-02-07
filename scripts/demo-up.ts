@@ -1,7 +1,9 @@
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { privateKeyToAccount } from 'viem/accounts';
 
 function parseDotEnv(filePath: string): Record<string, string> {
   if (!fs.existsSync(filePath)) return {};
@@ -46,7 +48,8 @@ async function checkListen(port: number, host: string): Promise<ListenCheck> {
 }
 
 async function isPortAvailable(port: number): Promise<boolean> {
-  const [v4, v6] = await Promise.all([checkListen(port, '0.0.0.0'), checkListen(port, '::')]);
+  // Some dev environments allow binding to localhost but not 0.0.0.0/::.
+  const [v4, v6] = await Promise.all([checkListen(port, '127.0.0.1'), checkListen(port, '::1')]);
 
   if (v4 === 'in_use' || v6 === 'in_use') return false;
   return v4 === 'available' || v6 === 'available';
@@ -116,7 +119,7 @@ const repoRoot = path.resolve(process.cwd());
 const dotEnv = parseDotEnv(path.join(repoRoot, '.env'));
 const env: NodeJS.ProcessEnv = { ...process.env, ...dotEnv };
 
-const pollMs = env.BOT_POLL_MS ? Number(env.BOT_POLL_MS) : 5000;
+const pollMs = env.BOT_POLL_MS ? Number(env.BOT_POLL_MS) : 1000;
 if (!env.BOT_POLL_MS) env.BOT_POLL_MS = String(pollMs);
 
 function setIfMissing(key: string, value: string) {
@@ -126,6 +129,33 @@ function setIfMissing(key: string, value: string) {
     return true;
   }
   return false;
+}
+
+type Hex = `0x${string}`;
+
+function normalizePrivateKey(value: string): Hex | null {
+  const trimmed = value.trim();
+  if (/^0x[0-9a-fA-F]{64}$/.test(trimmed)) return trimmed as Hex;
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) return (`0x${trimmed}`) as Hex;
+  return null;
+}
+
+function generatePrivateKey(): Hex {
+  return `0x${randomBytes(32).toString('hex')}`;
+}
+
+function ensureDemoPrivateKey(key: string, label: string) {
+  const existing = env[key];
+  const normalized = typeof existing === 'string' ? normalizePrivateKey(existing) : null;
+  if (normalized) {
+    env[key] = normalized;
+    return;
+  }
+
+  const generated = generatePrivateKey();
+  env[key] = generated;
+  const address = privateKeyToAccount(generated).address;
+  console.log(`INFO: ${key} missing; generated ${label} demo key (${address}). Set ${key} in .env to override.`);
 }
 
 function parseNodeMajor(version: string) {
@@ -158,7 +188,7 @@ function resolveDemoNodeVersion() {
   const requested = env.DEMO_NODE_VERSION?.trim();
   if (requested && /^\d+\.\d+\.\d+$/.test(requested)) return requested;
 
-  const installed = detectVoltaNodeVersion();
+  const installed = useVoltaForChildren ? detectVoltaNodeVersion() : null;
   if (installed) return installed;
 
   // Fall back to requested (even if it's "22"); this may require network for Volta.
@@ -205,8 +235,40 @@ async function main() {
   if (setIfMissing('YELLOW_MILESTONE_SPLITS', '5')) demoDefaults.push('YELLOW_MILESTONE_SPLITS=5');
   if (setIfMissing('V4_AGENT_STEPS', '5')) demoDefaults.push('V4_AGENT_STEPS=5');
   if (setIfMissing('V4SHM_DEMO_ACTIONS', 'true')) demoDefaults.push('V4SHM_DEMO_ACTIONS=true');
+  if (setIfMissing('V4SHM_QUIET_LOGS', 'true')) demoDefaults.push('V4SHM_QUIET_LOGS=true');
+  if (setIfMissing('BOT_POLL_MS', '1000')) demoDefaults.push('BOT_POLL_MS=1000');
+  if (setIfMissing('BOT_QUOTE_DELAY_MS_MIN', '5000')) demoDefaults.push('BOT_QUOTE_DELAY_MS_MIN=5000');
+  if (setIfMissing('BOT_QUOTE_DELAY_MS_MAX', '15000')) demoDefaults.push('BOT_QUOTE_DELAY_MS_MAX=15000');
   if (demoDefaults.length > 0) {
     console.log(`INFO: using demo defaults (${demoDefaults.join(', ')})`);
+  }
+
+  const autoPricesEnabled = env.V4SHM_DEMO_AUTOPRICES !== 'false';
+  if (autoPricesEnabled) {
+    function parseAmount(value: string | undefined): number | null {
+      if (typeof value !== 'string') return null;
+      const trimmed = value.trim();
+      if (trimmed === '') return null;
+      const parsed = Number(trimmed);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function clampDemoPrice(key: string, demoValue: string, opts: { maxAllowed: number }) {
+      const current = parseAmount(env[key]);
+      if (current !== null && current <= opts.maxAllowed) return;
+      if (typeof env[key] === 'string' && env[key]?.trim() !== '' && env[key] !== demoValue) {
+        console.log(
+          `INFO: overriding ${key}=${env[key]} with ${demoValue} for demo (set V4SHM_DEMO_AUTOPRICES=false to disable)`
+        );
+      } else if (!env[key]) {
+        console.log(`INFO: using ${key}=${demoValue} for demo (set V4SHM_DEMO_AUTOPRICES=false to disable)`);
+      }
+      env[key] = demoValue;
+    }
+
+    // Keep values in the "I only have a tiny demo wallet" range.
+    clampDemoPrice('SOLVER_PRICE', '0.05', { maxAllowed: 0.5 });
+    clampDemoPrice('SOLVER_B_PRICE', '0.04', { maxAllowed: 0.5 });
   }
 
   if (env.VERIFIER_MODE === 'real') {
@@ -257,6 +319,11 @@ async function main() {
     processes
   );
 
+  if (env.V4SHM_DEMO_AUTOKEYS !== 'false') {
+    ensureDemoPrivateKey('SOLVER_PRIVATE_KEY', 'solver-bot-a');
+    ensureDemoPrivateKey('SOLVER_B_PRIVATE_KEY', 'solver-bot-b');
+  }
+
   if (env.SOLVER_PRIVATE_KEY) {
     const solverBot = pnpmCmd(['-C', 'apps/solver-bot', 'dev']);
     startProcess('solver-bot-a', solverBot.cmd, solverBot.args, env, processes);
@@ -273,7 +340,7 @@ async function main() {
       {
         ...env,
         SOLVER_PRIVATE_KEY: env.SOLVER_B_PRIVATE_KEY,
-        SOLVER_PRICE: env.SOLVER_B_PRICE ?? '9',
+        SOLVER_PRICE: env.SOLVER_B_PRICE ?? '0.04',
         SOLVER_ETA_MINUTES: env.SOLVER_B_ETA_MINUTES ?? '12',
       },
       processes

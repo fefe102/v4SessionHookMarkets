@@ -26,7 +26,6 @@ export default function SelectBestQuoteButton(
     try {
       const res = await fetch(`${API_BASE}/work-orders/${workOrderId}/select?force=true`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
       });
 
       if (!res.ok) {
@@ -53,4 +52,3 @@ export default function SelectBestQuoteButton(
     </div>
   );
 }
-

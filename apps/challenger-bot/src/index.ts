@@ -5,6 +5,8 @@ import { signChallenge, signQuote, sha256Hex, WorkOrder, QuotePayload, Submissio
 const API_URL = process.env.API_URL ?? 'http://localhost:3001';
 const PRIVATE_KEY = process.env.CHALLENGER_PRIVATE_KEY;
 const BOT_POLL_MS = Number(process.env.BOT_POLL_MS ?? 0);
+const QUOTE_DELAY_MIN_MS = Math.max(0, Number(process.env.BOT_QUOTE_DELAY_MS_MIN ?? 0));
+const QUOTE_DELAY_MAX_MS = Math.max(QUOTE_DELAY_MIN_MS, Number(process.env.BOT_QUOTE_DELAY_MS_MAX ?? QUOTE_DELAY_MIN_MS));
 
 if (!PRIVATE_KEY) {
   console.error('Missing CHALLENGER_PRIVATE_KEY');
@@ -14,7 +16,9 @@ if (!PRIVATE_KEY) {
 const privateKey = PRIVATE_KEY;
 const wallet = new Wallet(privateKey);
 const challengerAddress = wallet.address;
-const CHALLENGER_ETA = Number(process.env.CHALLENGER_ETA_MINUTES ?? 999);
+const CHALLENGER_ETA = Number(process.env.CHALLENGER_ETA_MINUTES ?? 45);
+
+const scheduledJoinAtByWorkOrder = new Map<string, number>();
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -32,10 +36,30 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+function randomInt(min: number, max: number) {
+  if (max <= min) return min;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function joinAtMs(workOrder: WorkOrder) {
+  const existing = scheduledJoinAtByWorkOrder.get(workOrder.id);
+  if (existing !== undefined) return existing;
+  const delayMs = randomInt(QUOTE_DELAY_MIN_MS, QUOTE_DELAY_MAX_MS);
+  const scheduledAt = Math.max(Date.now(), workOrder.createdAt + delayMs);
+  scheduledJoinAtByWorkOrder.set(workOrder.id, scheduledAt);
+  return scheduledAt;
+}
+
 async function runOnce() {
   // Join work-order sessions during bidding so we can receive challenge rewards inside the same Yellow app session.
   const bidding = await fetchJson<WorkOrder[]>(`${API_URL}/solver/work-orders?status=BIDDING`);
   for (const workOrder of bidding) {
+    // Skip stale BIDDING work orders (API doesn't auto-transition on time).
+    if (Date.now() > workOrder.bidding.biddingEndsAt) {
+      scheduledJoinAtByWorkOrder.delete(workOrder.id);
+      continue;
+    }
+    if (Date.now() < joinAtMs(workOrder)) continue;
     const existing = await fetchJson<QuotePayload[]>(`${API_URL}/work-orders/${workOrder.id}/quotes`);
     if (existing.some((q) => q.solverAddress.toLowerCase() === challengerAddress.toLowerCase())) continue;
 
@@ -62,8 +86,12 @@ async function runOnce() {
         body: JSON.stringify(quote),
       });
       console.log(`joined bidding for ${workOrder.id}`);
-    } catch {
-      // ignore duplicates / already-closed bidding
+      scheduledJoinAtByWorkOrder.delete(workOrder.id);
+    } catch (err) {
+      const message = String((err as any)?.message ?? err);
+      if (message.includes('Bidding window closed') || message.includes('not accepting quotes')) {
+        scheduledJoinAtByWorkOrder.delete(workOrder.id);
+      }
     }
   }
 

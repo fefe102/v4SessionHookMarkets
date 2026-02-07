@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { Wallet } from 'ethers';
 import {
   signQuote,
@@ -14,9 +14,11 @@ import {
 
 const API_URL = process.env.API_URL ?? 'http://localhost:3001';
 const PRIVATE_KEY = process.env.SOLVER_PRIVATE_KEY;
-const SOLVER_PRICE = process.env.SOLVER_PRICE ?? '10';
+const SOLVER_PRICE = process.env.SOLVER_PRICE ?? '0.05';
 const SOLVER_ETA = Number(process.env.SOLVER_ETA_MINUTES ?? 15);
 const BOT_POLL_MS = Number(process.env.BOT_POLL_MS ?? 0);
+const QUOTE_DELAY_MIN_MS = Math.max(0, Number(process.env.BOT_QUOTE_DELAY_MS_MIN ?? 0));
+const QUOTE_DELAY_MAX_MS = Math.max(QUOTE_DELAY_MIN_MS, Number(process.env.BOT_QUOTE_DELAY_MS_MAX ?? QUOTE_DELAY_MIN_MS));
 
 if (!PRIVATE_KEY) {
   console.error('Missing SOLVER_PRIVATE_KEY');
@@ -26,6 +28,10 @@ if (!PRIVATE_KEY) {
 const privateKey = PRIVATE_KEY;
 const wallet = new Wallet(privateKey);
 const solverAddress = wallet.address;
+
+const scheduledQuoteAtByWorkOrder = new Map<string, number>();
+const inflightSubmissionByWorkOrder = new Set<string>();
+let inflightSubmissionCount = 0;
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -43,10 +49,59 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+async function runCommand(
+  cmd: string,
+  args: string[],
+  opts: { cwd: string; captureStdout?: boolean }
+): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      stdio: opts.captureStdout ? ['ignore', 'pipe', 'pipe'] : 'ignore',
+      shell: false,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    if (child.stdout) {
+      child.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+    }
+
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) return resolve(stdout.trim());
+      const suffix = stderr.trim() ? `: ${stderr.trim()}` : '';
+      reject(new Error(`${cmd} ${args.join(' ')} failed (code ${code})${suffix}`));
+    });
+  });
+}
+
+function randomInt(min: number, max: number) {
+  if (max <= min) return min;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function quoteAtMs(workOrder: WorkOrder) {
+  const existing = scheduledQuoteAtByWorkOrder.get(workOrder.id);
+  if (existing !== undefined) return existing;
+  const delayMs = randomInt(QUOTE_DELAY_MIN_MS, QUOTE_DELAY_MAX_MS);
+  const scheduledAt = Math.max(Date.now(), workOrder.createdAt + delayMs);
+  scheduledQuoteAtByWorkOrder.set(workOrder.id, scheduledAt);
+  return scheduledAt;
+}
+
 async function submitQuote(workOrder: WorkOrder) {
   // Avoid spamming duplicate quotes when running in poll mode.
   const existing = await fetchJson<QuotePayload[]>(`${API_URL}/work-orders/${workOrder.id}/quotes`);
   if (existing.some((q) => q.solverAddress.toLowerCase() === solverAddress.toLowerCase())) {
+    scheduledQuoteAtByWorkOrder.delete(workOrder.id);
     return;
   }
 
@@ -73,6 +128,7 @@ async function submitQuote(workOrder: WorkOrder) {
     body: JSON.stringify(quote),
   });
   console.log(`quote submitted for ${workOrder.id}`);
+  scheduledQuoteAtByWorkOrder.delete(workOrder.id);
 }
 
 function ensureRepoDir(workOrderId: string) {
@@ -119,23 +175,23 @@ contract WhitelistHook {
   fs.writeFileSync(path.join(repoDir, 'Hook.sol'), hookBody, 'utf8');
 }
 
-function initGitRepo(repoDir: string) {
+async function initGitRepo(repoDir: string) {
   if (!fs.existsSync(path.join(repoDir, '.git'))) {
-    execSync('git init', { cwd: repoDir, stdio: 'ignore' });
-    execSync('git config user.email "solver@local"', { cwd: repoDir, stdio: 'ignore' });
-    execSync('git config user.name "solver-bot"', { cwd: repoDir, stdio: 'ignore' });
-    execSync('git config commit.gpgsign false', { cwd: repoDir, stdio: 'ignore' });
+    await runCommand('git', ['init'], { cwd: repoDir });
+    await runCommand('git', ['config', 'user.email', 'solver@local'], { cwd: repoDir });
+    await runCommand('git', ['config', 'user.name', 'solver-bot'], { cwd: repoDir });
+    await runCommand('git', ['config', 'commit.gpgsign', 'false'], { cwd: repoDir });
   }
-  execSync('git add .', { cwd: repoDir, stdio: 'ignore' });
-  execSync('git commit -m "feat: add hook artifact" --allow-empty', { cwd: repoDir, stdio: 'ignore' });
-  const commitSha = execSync('git rev-parse HEAD', { cwd: repoDir }).toString().trim();
+  await runCommand('git', ['add', '.'], { cwd: repoDir });
+  await runCommand('git', ['commit', '-m', 'feat: add hook artifact', '--allow-empty'], { cwd: repoDir });
+  const commitSha = await runCommand('git', ['rev-parse', 'HEAD'], { cwd: repoDir, captureStdout: true });
   return commitSha;
 }
 
 async function submitArtifact(workOrder: WorkOrder) {
   const repoDir = ensureRepoDir(workOrder.id);
   writeHookTemplate(workOrder, repoDir);
-  const commitSha = initGitRepo(repoDir);
+  const commitSha = await initGitRepo(repoDir);
   const repoUrl = repoDir;
   const artifactHash = sha256Hex(`${repoUrl}:${commitSha}`);
 
@@ -170,25 +226,59 @@ async function submitArtifact(workOrder: WorkOrder) {
   console.log(`submission sent for ${workOrder.id}`);
 }
 
+function startSubmission(workOrder: WorkOrder) {
+  if (inflightSubmissionByWorkOrder.has(workOrder.id)) return;
+  inflightSubmissionByWorkOrder.add(workOrder.id);
+  inflightSubmissionCount += 1;
+  // Fire-and-forget so bidding/quoting stays responsive during artifact creation.
+  void submitArtifact(workOrder)
+    .catch((err) => {
+      console.error('submission failed', workOrder.id, err);
+    })
+    .finally(() => {
+      inflightSubmissionByWorkOrder.delete(workOrder.id);
+      inflightSubmissionCount = Math.max(0, inflightSubmissionCount - 1);
+    });
+}
+
 async function runOnce() {
   const bidding = await fetchJson<WorkOrder[]>(`${API_URL}/solver/work-orders?status=BIDDING`);
   for (const workOrder of bidding) {
-    await submitQuote(workOrder);
+    // Skip stale BIDDING work orders (API doesn't auto-transition on time).
+    if (Date.now() > workOrder.bidding.biddingEndsAt) {
+      scheduledQuoteAtByWorkOrder.delete(workOrder.id);
+      continue;
+    }
+    if (Date.now() < quoteAtMs(workOrder)) continue;
+    try {
+      await submitQuote(workOrder);
+    } catch (err) {
+      // Keep looping so one bad work order can't block all bidding activity.
+      console.error('quote failed', workOrder.id, err);
+    }
   }
+
+  // Keep the polling loop responsive: only allow a small number of inflight submissions.
+  const maxInflight = Math.max(1, Number(process.env.BOT_MAX_INFLIGHT_SUBMISSIONS ?? 1));
+  if (inflightSubmissionCount >= maxInflight) return;
 
   const selected = await fetchJson<WorkOrder[]>(`${API_URL}/work-orders?status=SELECTED`);
   for (const workOrder of selected) {
+    if (inflightSubmissionCount >= maxInflight) break;
     if (workOrder.selection.selectedSolverId?.toLowerCase() !== solverAddress.toLowerCase()) continue;
     const submissions = await fetchJson<SubmissionPayload[]>(`${API_URL}/work-orders/${workOrder.id}/submissions`);
     if (submissions.find((s) => s.solverAddress.toLowerCase() === solverAddress.toLowerCase())) continue;
-    await submitArtifact(workOrder);
+    startSubmission(workOrder);
   }
+
+  if (inflightSubmissionCount >= maxInflight) return;
 
   const challenged = await fetchJson<WorkOrder[]>(`${API_URL}/work-orders?status=CHALLENGED`);
   for (const workOrder of challenged) {
+    if (inflightSubmissionCount >= maxInflight) break;
     if (workOrder.selection.selectedSolverId?.toLowerCase() !== solverAddress.toLowerCase()) continue;
     if (workOrder.deadlines.patchEndsAt && Date.now() > workOrder.deadlines.patchEndsAt) continue;
-    await submitArtifact(workOrder);
+    startSubmission(workOrder);
   }
 }
 

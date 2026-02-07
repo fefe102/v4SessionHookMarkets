@@ -93,6 +93,7 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
           <p>Selected quote: {workOrder.selection.selectedQuoteId ?? 'n/a'}</p>
           <p>Selected solver: {workOrder.selection.selectedSolverId ?? 'n/a'}</p>
           <p>Selected at: {workOrder.selection.selectedAt ? new Date(workOrder.selection.selectedAt).toLocaleTimeString() : 'n/a'}</p>
+          <p>Requester: {workOrder.requesterAddress ?? 'n/a'}</p>
           <p>Yellow session: {workOrder.yellow.yellowSessionId ?? 'n/a'}</p>
           <p>Settlement: {workOrder.yellow.settlementTxId ?? 'n/a'}</p>
         </div>

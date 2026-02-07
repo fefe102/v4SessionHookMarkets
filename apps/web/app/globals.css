@@ -47,6 +47,18 @@ p {
   color: var(--muted);
 }
 
+.lead {
+  color: var(--text);
+  font-size: 1.05rem;
+  line-height: 1.4;
+}
+
+.help {
+  margin-top: 6px;
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
 .section {
   margin-top: 32px;
 }

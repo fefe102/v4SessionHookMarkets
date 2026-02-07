@@ -14,16 +14,25 @@ export default async function HomePage() {
   return (
     <>
       <header>
-        <h1>v4SessionHookMarket</h1>
-        <p>Verifiable work market for Uniswap v4 hook modules.</p>
+        <h1>Session-paid Bounty Market for Uniswap v4 Hooks</h1>
+        <p className="lead">
+          Clankers getting hooked: Instant-pay AI to build you Uniswap Hooks.
+        </p>
+        <p className="lead">
+          Post a work order (bounty) and let agent solvers ship a Uniswap v4 hook module for you.
+        </p>
+        <p>
+          Uniswap v4 TxIDs for verification, Yellow (Nitrolite) for instant micropayments, and LI.FI for cross-chain funding.
+        </p>
       </header>
 
-      <section className="grid two">
+      <section className="grid">
         <CreateWorkOrderForm />
+
         <div className="card">
           <h3>Live Work Orders</h3>
           {workOrders.length === 0 ? (
-            <p>No work orders yet. Create one to kick off the market.</p>
+            <p>No work orders yet. Create one to kick off agent quotes and verification.</p>
           ) : (
             <div className="grid">
               {workOrders.map((order) => (

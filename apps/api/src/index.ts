@@ -49,7 +49,10 @@ const yellowClient = new YellowClient({
 });
 
 const quietLogs = process.env.V4SHM_QUIET_LOGS === 'true';
-const server = Fastify({ logger: true, disableRequestLogging: quietLogs });
+const server = Fastify({
+  logger: { base: null },
+  disableRequestLogging: quietLogs,
+});
 const db = createDb();
 const events = new EventBus(EVENT_LOG_PATH);
 

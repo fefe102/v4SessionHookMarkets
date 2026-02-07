@@ -1,7 +1,11 @@
 import Fastify from 'fastify';
 import { runVerification, runChallenge } from './runner.js';
 
-const server = Fastify({ logger: true });
+const quietLogs = process.env.V4SHM_QUIET_LOGS === 'true';
+const server = Fastify({
+  logger: { base: null },
+  disableRequestLogging: quietLogs,
+});
 
 const mode = (process.env.VERIFIER_MODE ?? 'mock') as 'mock' | 'real';
 

@@ -5,6 +5,38 @@ import EndSessionButton from '../../components/EndSessionButton';
 import SelectBestQuoteButton from '../../components/SelectBestQuoteButton';
 import type { WorkOrder, QuotePayload, SubmissionPayload, PaymentEvent, VerificationReport } from '@v4shm/shared';
 
+function formatQuotePrice(amount: string, currency: string) {
+  const trimmed = String(amount ?? '').trim();
+  const currencyTrimmed = String(currency ?? '').trim();
+  if (currencyTrimmed === '') return trimmed;
+  const lower = currencyTrimmed.toLowerCase();
+  if (lower.endsWith('usd')) return `$${trimmed}`;
+  return `${trimmed} ${currencyTrimmed}`;
+}
+
+function formatEtaMinutes(minutes: number) {
+  const total = Number(minutes);
+  if (!Number.isFinite(total) || total < 0) return `${minutes}m`;
+  if (total < 60) return `${Math.round(total)}m`;
+  const hours = Math.floor(total / 60);
+  const mins = Math.round(total % 60);
+  return mins === 0 ? `${hours}h` : `${hours}h ${mins}m`;
+}
+
+function reputationTierByRank(rank: number, total: number) {
+  if (total <= 1) return { emoji: '🟢', label: 'High' };
+  if (total === 2) return rank === 0 ? { emoji: '🟢', label: 'High' } : { emoji: '🆕', label: 'New' };
+  if (total === 3) {
+    if (rank === 0) return { emoji: '🟢', label: 'High' };
+    if (rank === 1) return { emoji: '🟡', label: 'Mid' };
+    return { emoji: '🆕', label: 'New' };
+  }
+  if (rank === 0) return { emoji: '🟢', label: 'High' };
+  if (rank === 1) return { emoji: '🟡', label: 'Mid' };
+  if (rank === 2) return { emoji: '🟠', label: 'Low' };
+  return { emoji: '🆕', label: 'New' };
+}
+
 export default async function WorkOrderPage({ params }: { params: { id: string } }) {
   const id = params.id;
   let workOrder: WorkOrder | null = null;
@@ -45,6 +77,17 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
   const reputationMap = new Map(
     solverStats.map((row) => [String(row.stats?.solverAddress ?? '').toLowerCase(), row.reputation])
   );
+  const rankedSolvers = [...new Set(quotes.map((quote) => quote.solverAddress.toLowerCase()))]
+    .map((solverAddress) => ({
+      solverAddress,
+      score: Number(reputationMap.get(solverAddress)?.score ?? 0),
+    }))
+    .sort((a, b) => {
+      const scoreDiff = b.score - a.score;
+      if (scoreDiff !== 0) return scoreDiff;
+      return a.solverAddress.localeCompare(b.solverAddress);
+    });
+  const solverRank = new Map(rankedSolvers.map((row, idx) => [row.solverAddress, idx]));
   const paidMilestones = new Set(
     payments
       .filter((payment) => payment.milestoneKey)
@@ -104,14 +147,24 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
           <h3>Quotes</h3>
           {quotes.length === 0 ? <p>No quotes yet.</p> : (
             <div className="grid">
-              {quotes.map((quote) => (
-                <div key={quote.id} className="card">
-                  <p>{quote.solverAddress}</p>
-                  <p>{quote.price} / ETA {quote.etaMinutes}m</p>
-                  <p>Reputation: {reputationMap.get(quote.solverAddress.toLowerCase())?.score ?? 'n/a'}</p>
-                  {quote.id === workOrder.selection.selectedQuoteId ? <p className="badge">Selected</p> : null}
-                </div>
-              ))}
+              {quotes.map((quote) => {
+                const key = quote.solverAddress.toLowerCase();
+                const score = Number(reputationMap.get(key)?.score ?? 0);
+                const rank = solverRank.get(key) ?? rankedSolvers.length - 1;
+                const tier = reputationTierByRank(rank, rankedSolvers.length);
+
+                return (
+                  <div key={quote.id} className="card">
+                    <p>{quote.solverAddress}</p>
+                    <p>
+                      <strong>{formatQuotePrice(quote.price, workOrder.bounty.currency)}</strong>
+                      {' '}· ETA to finish: {formatEtaMinutes(quote.etaMinutes)}
+                    </p>
+                    <p>Reputation: {tier.emoji} {tier.label}{score > 0 ? ` (${score})` : ''}</p>
+                    {quote.id === workOrder.selection.selectedQuoteId ? <p className="badge">Selected</p> : null}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

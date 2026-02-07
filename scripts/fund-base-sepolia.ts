@@ -30,6 +30,7 @@ const KEY_ENV_NAMES = [
   { name: 'YELLOW_PRIVATE_KEY', label: 'yellow' },
   { name: 'V4_PRIVATE_KEY', label: 'verifier' },
   { name: 'SOLVER_PRIVATE_KEY', label: 'solver' },
+  { name: 'SOLVER_B_PRIVATE_KEY', label: 'solver-b' },
   { name: 'CHALLENGER_PRIVATE_KEY', label: 'challenger' },
 ] as const;
 

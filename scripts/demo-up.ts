@@ -122,6 +122,22 @@ function startProcess(
   return child;
 }
 
+async function waitForHttpOk(url: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return;
+    } catch {
+      // ignore while booting
+    }
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(`Timed out waiting for ${url}`);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
 const repoRoot = path.resolve(process.cwd());
 const dotEnv = parseDotEnv(path.join(repoRoot, '.env'));
 // Typical precedence: allow the caller to override `.env` via shell env vars.
@@ -327,6 +343,9 @@ async function main() {
     env,
     processes
   );
+
+  // Avoid noisy ECONNREFUSED loops from bots during startup.
+  await waitForHttpOk(`${env.API_URL}/health`, 20000);
 
   if (env.V4SHM_DEMO_AUTOKEYS !== 'false') {
     ensureDemoPrivateKey('SOLVER_PRIVATE_KEY', 'solver-bot-a');

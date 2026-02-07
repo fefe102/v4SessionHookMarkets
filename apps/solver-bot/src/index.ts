@@ -33,6 +33,26 @@ const scheduledQuoteAtByWorkOrder = new Map<string, number>();
 const inflightSubmissionByWorkOrder = new Set<string>();
 let inflightSubmissionCount = 0;
 
+function parseAmount(value: unknown): number | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const parsed = Number(String(value).trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatAmount(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  if (value <= 0) return '0';
+  const fixed = value.toFixed(4);
+  return fixed.replace(/\.?0+$/, '');
+}
+
+function resolveQuotePrice(workOrder: WorkOrder): string {
+  const requested = parseAmount(SOLVER_PRICE);
+  const bountyCap = parseAmount(workOrder.bounty?.amount);
+  if (requested === null || bountyCap === null) return SOLVER_PRICE;
+  return formatAmount(Math.min(requested, bountyCap));
+}
+
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     headers: { 'content-type': 'application/json' },
@@ -105,9 +125,10 @@ async function submitQuote(workOrder: WorkOrder) {
     return;
   }
 
+  const quotePrice = resolveQuotePrice(workOrder);
   const quoteMessage = {
     workOrderId: workOrder.id,
-    price: SOLVER_PRICE,
+    price: quotePrice,
     etaMinutes: SOLVER_ETA,
     validUntil: Date.now() + 5 * 60 * 1000,
   };
@@ -116,19 +137,31 @@ async function submitQuote(workOrder: WorkOrder) {
     id: randomUUID(),
     workOrderId: workOrder.id,
     solverAddress,
-    price: SOLVER_PRICE,
+    price: quotePrice,
     etaMinutes: SOLVER_ETA,
     validUntil: quoteMessage.validUntil,
     signature,
     createdAt: Date.now(),
   };
 
-  await fetchJson(`${API_URL}/solver/quotes`, {
-    method: 'POST',
-    body: JSON.stringify(quote),
-  });
-  console.log(`quote submitted for ${workOrder.id}`);
-  scheduledQuoteAtByWorkOrder.delete(workOrder.id);
+  try {
+    await fetchJson(`${API_URL}/solver/quotes`, {
+      method: 'POST',
+      body: JSON.stringify(quote),
+    });
+    console.log(`quote submitted for ${workOrder.id}`);
+    scheduledQuoteAtByWorkOrder.delete(workOrder.id);
+  } catch (err) {
+    const message = String((err as any)?.message ?? err);
+    // Avoid log spam on unrecoverable 400s.
+    if (message.includes('Quote exceeds bounty amount') || message.includes('Bidding window closed') || message.includes('not accepting quotes')) {
+      scheduledQuoteAtByWorkOrder.delete(workOrder.id);
+      return;
+    }
+    // Small backoff to avoid hammering the API if it's restarting.
+    scheduledQuoteAtByWorkOrder.set(workOrder.id, Date.now() + 5000);
+    throw err;
+  }
 }
 
 function ensureRepoDir(workOrderId: string) {

@@ -1,8 +1,8 @@
 # v4SessionHookMarkets
 
-Instant Yellow session-paid agent market for Uniswap v4 hooks: tx proof, off-chain pay, settle once.
+Instant Yellow session-paid Uniswap AI agent marketplace for v4 hooks: onchain proof, offchain pay.
 
-A new kind of marketplace where agents compete to deliver Uniswap v4 hook modules (new market structures). A requester posts a HookSpec (executable tests + an onchain proof script) and funds a single Yellow session. Solvers bid price/ETA and submit a commit; the verifier deploys the winning hook into a real v4 pool (Base Sepolia) and produces TxIDs/logs as receipts. Payments stream off-chain inside the session (quote rewards + milestones) and can optionally settle on-chain. Optional cross-chain funding/cashout via LI.FI.
+A new kind of marketplace where agents compete to deliver Uniswap v4 hook modules (new market structures). A requester posts a HookSpec as executable tests + an onchain proof script and funds a single Yellow session. Solvers bid on price/ETA; the verifier agent streams quote rewards and milestone payouts instantly off-chain, then settles once on-chain. The winning hook is deployed into a real v4 pool (Base Sepolia) and proven with TxIDs/logs for reliability and transparency. Cross-chain funding/payout via LI.FI.
 
 Business model idea: small success fee + optional paid verification.
 
@@ -40,7 +40,7 @@ Notes:
 - To guarantee 2+ quotes, set `SOLVER_B_PRIVATE_KEY` (starts a second solver bot with a different price/ETA).
 - For Yellow prize demos, set `YELLOW_MILESTONE_SPLITS=5` (or higher) to stream each milestone as multiple offchain transfers (`pnpm demo:up` defaults this to 5 if unset).
 - For Uniswap v4 TxIDs volume, set `V4_AGENT_STEPS=5` (or higher) for a multi-tx “agent loop” (`pnpm demo:up` defaults this to 5 if unset).
-- Optional LI.FI prize: open http://localhost:3000/lifi to bridge/swap cross-chain (fund requester or cash out). Requires a browser wallet.
+- LI.FI prize: open http://localhost:3000/lifi to bridge/swap cross-chain (fund requester or cash out). Requires a browser wallet.
 
 Fast demo video (20–30 seconds):
 1) (Off-camera) Create a work order, wait for 2+ quotes, click `Close Bidding + Select`, then wait until “Payments” has multiple entries and “Verification Report” shows `TxIDs: N`.
@@ -77,7 +77,7 @@ BOT_POLL_MS=5000 pnpm -C apps/challenger-bot dev
 Yellow sandbox funds are separate from Base Sepolia ETH:
 - Base Sepolia ETH pays gas for the verifier's onchain proof txs.
 - Yellow `ytest.usd` funds the offchain quote rewards + milestone payouts in the session.
- - Optional: `YELLOW_ENABLE_CHANNELS=true` will attempt to close a Nitrolite channel and return an onchain tx hash, but requires the requester wallet to have Base Sepolia ETH for gas and an onchain custody balance for `ytest.usd` (not provided by the sandbox faucet).
+- `YELLOW_ENABLE_CHANNELS=true` will attempt to close a Nitrolite channel and return an onchain tx hash, but requires the requester wallet to have Base Sepolia ETH for gas and an onchain custody balance for `ytest.usd` (not provided by the sandbox faucet).
 
 Call the faucet for the *requester address* (the address derived from `YELLOW_PRIVATE_KEY`):
 

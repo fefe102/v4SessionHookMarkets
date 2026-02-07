@@ -339,6 +339,54 @@ function syncYellowStateFromDb(workOrder: WorkOrder): boolean {
   return true;
 }
 
+function reconcileYellowStateFromPayments(workOrder: WorkOrder): boolean {
+  const session = buildSessionState(workOrder);
+  if (!session) return false;
+  const payments = db.listPaymentEvents(workOrder.id).map((evt) => evt.payload as PaymentEvent);
+  if (payments.length === 0) return false;
+
+  const parsedTransferVersions = payments
+    .map((payment) => Number(payment.yellowTransferId))
+    .filter((version) => Number.isFinite(version));
+  if (parsedTransferVersions.length === 0) return false;
+
+  const maxVersion = Math.max(...parsedTransferVersions);
+  const payer = session.participants[0];
+  if (!payer) return false;
+
+  const decimals = YELLOW_ASSET.decimals;
+  const payerKey = payer.toLowerCase();
+
+  const balances = new Map<string, bigint>();
+  for (const participant of session.participants) {
+    balances.set(participant.toLowerCase(), 0n);
+  }
+  balances.set(payerKey, toUnits(session.allowanceTotal, decimals));
+
+  const ordered = [...payments].sort((a, b) => {
+    const aVer = Number(a.yellowTransferId);
+    const bVer = Number(b.yellowTransferId);
+    if (Number.isFinite(aVer) && Number.isFinite(bVer) && aVer !== bVer) return aVer - bVer;
+    return a.createdAt - b.createdAt;
+  });
+
+  for (const payment of ordered) {
+    const amountUnits = toUnits(String(payment.amount), decimals);
+    balances.set(payerKey, (balances.get(payerKey) ?? 0n) - amountUnits);
+    const toKey = payment.toAddress.toLowerCase();
+    balances.set(toKey, (balances.get(toKey) ?? 0n) + amountUnits);
+  }
+
+  workOrder.yellow.sessionVersion = maxVersion;
+  workOrder.yellow.allocations = session.participants.map((participant) => ({
+    participant,
+    amount: fromUnits(balances.get(participant.toLowerCase()) ?? 0n, decimals),
+  }));
+
+  persistWorkOrder(workOrder);
+  return true;
+}
+
 async function recordPayment(workOrder: WorkOrder, paymentEvent: PaymentEvent) {
   async function attemptTransfer() {
     return await yellowClientForWorkOrder(workOrder).transfer({
@@ -357,10 +405,17 @@ async function recordPayment(workOrder: WorkOrder, paymentEvent: PaymentEvent) {
     const mismatch = parseYellowVersionMismatch(message);
     if (mismatch && message.toLowerCase().includes('incorrect app state')) {
       // Another request may have advanced the Yellow app-session version. Refresh from the DB and retry once.
-      if (syncYellowStateFromDb(workOrder)) {
+      syncYellowStateFromDb(workOrder);
+      try {
         transfer = await attemptTransfer();
-      } else {
-        throw err;
+      } catch (retryErr) {
+        // If the DB got overwritten with a stale Yellow session snapshot, rebuild the session state
+        // from the payment event ledger and try one last time.
+        if (reconcileYellowStateFromPayments(workOrder)) {
+          transfer = await attemptTransfer();
+        } else {
+          throw retryErr;
+        }
       }
     } else {
       throw err;
@@ -1087,105 +1142,109 @@ server.post('/challenger/challenges', async (request, reply) => {
     createdAt: number;
   };
 
-  const record = db.getWorkOrder(body.workOrderId);
-  if (!record) return reply.status(404).send({ error: 'Work order not found' });
-  const workOrder = normalizeWorkOrder(record.payload as WorkOrder);
+  const result = await queueWorkOrder(body.workOrderId, async () => {
+    const record = db.getWorkOrder(body.workOrderId);
+    if (!record) return { status: 404, body: { error: 'Work order not found' } };
+    const workOrder = normalizeWorkOrder(record.payload as WorkOrder);
 
-  if (workOrder.status !== 'PASSED_PENDING_CHALLENGE') {
-    return reply.status(400).send({ error: 'Work order is not in challenge window' });
-  }
-  if (workOrder.deadlines.challengeEndsAt && Date.now() > workOrder.deadlines.challengeEndsAt) {
-    return reply.status(400).send({ error: 'Challenge window closed' });
-  }
-  if (workOrder.challenge.status !== 'OPEN') {
-    return reply.status(400).send({ error: 'Challenge window not open' });
-  }
+    if (workOrder.status !== 'PASSED_PENDING_CHALLENGE') {
+      return { status: 400, body: { error: 'Work order is not in challenge window' } };
+    }
+    if (workOrder.deadlines.challengeEndsAt && Date.now() > workOrder.deadlines.challengeEndsAt) {
+      return { status: 400, body: { error: 'Challenge window closed' } };
+    }
+    if (workOrder.challenge.status !== 'OPEN') {
+      return { status: 400, body: { error: 'Challenge window not open' } };
+    }
 
-  const challengerInSession = (workOrder.yellow.participants ?? [])
-    .some((participant) => participant.toLowerCase() === body.challengerAddress.toLowerCase());
-  if (!challengerInSession) {
-    return reply.status(400).send({ error: 'Challenger must have joined the Yellow session during bidding' });
-  }
+    const challengerInSession = (workOrder.yellow.participants ?? [])
+      .some((participant) => participant.toLowerCase() === body.challengerAddress.toLowerCase());
+    if (!challengerInSession) {
+      return { status: 400, body: { error: 'Challenger must have joined the Yellow session during bidding' } };
+    }
 
-  const reproductionHash = sha256Hex(JSON.stringify(body.reproductionSpec ?? {}));
-  const message: ChallengeMessage = {
-    workOrderId: body.workOrderId,
-    submissionId: body.submissionId,
-    reproductionHash,
-  };
-  const recovered = recoverChallengeSigner(message, body.signature);
-  if (getAddress(recovered) !== getAddress(body.challengerAddress)) {
-    return reply.status(400).send({ error: 'Invalid challenge signature' });
-  }
+    const reproductionHash = sha256Hex(JSON.stringify(body.reproductionSpec ?? {}));
+    const message: ChallengeMessage = {
+      workOrderId: body.workOrderId,
+      submissionId: body.submissionId,
+      reproductionHash,
+    };
+    const recovered = recoverChallengeSigner(message, body.signature);
+    if (getAddress(recovered) !== getAddress(body.challengerAddress)) {
+      return { status: 400, body: { error: 'Invalid challenge signature' } };
+    }
 
-  const submissionRecord = db.getSubmission(body.submissionId);
-  if (!submissionRecord) return reply.status(404).send({ error: 'Submission not found' });
-  if (submissionRecord.workOrderId !== body.workOrderId) {
-    return reply.status(400).send({ error: 'Submission does not belong to work order' });
-  }
+    const submissionRecord = db.getSubmission(body.submissionId);
+    if (!submissionRecord) return { status: 404, body: { error: 'Submission not found' } };
+    if (submissionRecord.workOrderId !== body.workOrderId) {
+      return { status: 400, body: { error: 'Submission does not belong to work order' } };
+    }
 
-  const verifierResponse = await fetch(`${VERIFIER_URL}/challenge`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workOrder, submission: submissionRecord.payload, challenge: body }),
+    const verifierResponse = await fetch(`${VERIFIER_URL}/challenge`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ workOrder, submission: submissionRecord.payload, challenge: body }),
+    });
+
+    if (!verifierResponse.ok) {
+      const errorText = await verifierResponse.text();
+      return { status: 500, body: { error: 'Verifier failed', details: errorText } };
+    }
+
+    const verifierResult = (await verifierResponse.json()) as { outcome: 'SUCCESS' | 'REJECTED' };
+
+    if (verifierResult.outcome === 'SUCCESS') {
+      const selectedQuoteId = workOrder.selection.selectedQuoteId;
+      const selectedQuote = selectedQuoteId
+        ? (db.listQuotes(workOrder.id).map((q) => q.payload as QuotePayload).find((q) => q.id === selectedQuoteId) ?? null)
+        : null;
+      const basePrice = selectedQuote ? Number(selectedQuote.price) : Number(workOrder.bounty.amount);
+      const challengeAmount = ((basePrice * 20) / 100).toFixed(4);
+      const now = Date.now();
+
+      if (PATCH_WINDOW_MS > 0) {
+        workOrder.status = 'CHALLENGED';
+        workOrder.deadlines.patchEndsAt = now + PATCH_WINDOW_MS;
+        workOrder.challenge.status = 'PATCH_WINDOW';
+        workOrder.challenge.challengeId = body.id;
+        workOrder.challenge.challengerAddress = body.challengerAddress;
+        workOrder.challenge.pendingRewardAmount = challengeAmount;
+        persistWorkOrder(workOrder);
+        emit(workOrder.id, 'challengeOpened', { challenge: body, patchEndsAt: workOrder.deadlines.patchEndsAt });
+      } else {
+        const paymentEvent: PaymentEvent = {
+          id: randomUUID(),
+          workOrderId: workOrder.id,
+          type: 'CHALLENGE_REWARD',
+          toAddress: body.challengerAddress,
+          amount: challengeAmount,
+          yellowTransferId: null,
+          milestoneKey: 'M5_NO_CHALLENGE_OR_PATCH_OK',
+          createdAt: now,
+        };
+        await recordPayment(workOrder, paymentEvent);
+        workOrder.status = 'FAILED';
+        persistWorkOrder(workOrder);
+        emit(workOrder.id, 'challengeSucceeded', { challenge: body, paymentEvent });
+        if (selectedQuote) {
+          const solverStats = getSolverStats(selectedQuote.solverAddress);
+          solverStats.challengesAgainst += 1;
+          saveSolverStats(solverStats);
+        }
+        const challengerStats = getSolverStats(body.challengerAddress);
+        challengerStats.challengesWon += 1;
+        saveSolverStats(challengerStats);
+      }
+    } else {
+      workOrder.challenge.status = 'REJECTED';
+      persistWorkOrder(workOrder);
+      emit(workOrder.id, 'challengeRejected', { challenge: body });
+    }
+
+    return { status: 200, body: verifierResult };
   });
 
-  if (!verifierResponse.ok) {
-    const errorText = await verifierResponse.text();
-    return reply.status(500).send({ error: 'Verifier failed', details: errorText });
-  }
-
-  const result = (await verifierResponse.json()) as { outcome: 'SUCCESS' | 'REJECTED' };
-
-  if (result.outcome === 'SUCCESS') {
-    const selectedQuoteId = workOrder.selection.selectedQuoteId;
-    const selectedQuote = selectedQuoteId
-      ? (db.listQuotes(workOrder.id).map((q) => q.payload as QuotePayload).find((q) => q.id === selectedQuoteId) ?? null)
-      : null;
-    const basePrice = selectedQuote ? Number(selectedQuote.price) : Number(workOrder.bounty.amount);
-    const challengeAmount = ((basePrice * 20) / 100).toFixed(4);
-    const now = Date.now();
-
-    if (PATCH_WINDOW_MS > 0) {
-      workOrder.status = 'CHALLENGED';
-      workOrder.deadlines.patchEndsAt = now + PATCH_WINDOW_MS;
-      workOrder.challenge.status = 'PATCH_WINDOW';
-      workOrder.challenge.challengeId = body.id;
-      workOrder.challenge.challengerAddress = body.challengerAddress;
-      workOrder.challenge.pendingRewardAmount = challengeAmount;
-      persistWorkOrder(workOrder);
-      emit(workOrder.id, 'challengeOpened', { challenge: body, patchEndsAt: workOrder.deadlines.patchEndsAt });
-    } else {
-      const paymentEvent: PaymentEvent = {
-        id: randomUUID(),
-        workOrderId: workOrder.id,
-        type: 'CHALLENGE_REWARD',
-        toAddress: body.challengerAddress,
-        amount: challengeAmount,
-        yellowTransferId: null,
-        milestoneKey: 'M5_NO_CHALLENGE_OR_PATCH_OK',
-        createdAt: now,
-      };
-      await recordPayment(workOrder, paymentEvent);
-      workOrder.status = 'FAILED';
-      persistWorkOrder(workOrder);
-      emit(workOrder.id, 'challengeSucceeded', { challenge: body, paymentEvent });
-      if (selectedQuote) {
-        const solverStats = getSolverStats(selectedQuote.solverAddress);
-        solverStats.challengesAgainst += 1;
-        saveSolverStats(solverStats);
-      }
-      const challengerStats = getSolverStats(body.challengerAddress);
-      challengerStats.challengesWon += 1;
-      saveSolverStats(challengerStats);
-    }
-  } else {
-    workOrder.challenge.status = 'REJECTED';
-    persistWorkOrder(workOrder);
-    emit(workOrder.id, 'challengeRejected', { challenge: body });
-  }
-
-  return reply.status(200).send(result);
+  return reply.status(result.status).send(result.body);
 });
 
 server.get('/work-orders/:id/ws', { websocket: true }, (connection, request) => {

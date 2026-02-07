@@ -4,10 +4,57 @@ pragma solidity ^0.8.24;
 import "forge-std/Script.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {IERC20Minimal} from "v4-core/src/interfaces/external/IERC20Minimal.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
+import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
+
+contract NegativeSwapProbe {
+    event NegativeSwapOutcome(bool reverted, string reason);
+
+    address public immutable swapTest;
+
+    constructor(address swapTestAddress, address currency0, address currency1) {
+        swapTest = swapTestAddress;
+        IERC20Minimal(currency0).approve(swapTestAddress, type(uint256).max);
+        IERC20Minimal(currency1).approve(swapTestAddress, type(uint256).max);
+    }
+
+    function probeSwap(
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        PoolSwapTest.TestSettings calldata settings,
+        bytes calldata hookData
+    ) external {
+        try PoolSwapTest(swapTest).swap(key, params, settings, hookData) returns (BalanceDelta) {
+            emit NegativeSwapOutcome(false, "");
+        } catch (bytes memory revertData) {
+            emit NegativeSwapOutcome(true, _decodeRevertString(revertData));
+        }
+    }
+
+    function _decodeRevertString(bytes memory revertData) internal pure returns (string memory) {
+        if (revertData.length < 4) return "";
+
+        bytes4 selector;
+        assembly {
+            selector := mload(add(revertData, 32))
+        }
+
+        // Error(string)
+        if (selector == 0x08c379a0 && revertData.length >= 4 + 32 + 32) {
+            bytes memory sliced = new bytes(revertData.length - 4);
+            for (uint256 i = 4; i < revertData.length; i++) {
+                sliced[i - 4] = revertData[i];
+            }
+            return abi.decode(sliced, (string));
+        }
+
+        return "";
+    }
+}
 
 contract V4NegativeProof is Script {
     function run() external {
@@ -56,9 +103,17 @@ contract V4NegativeProof is Script {
         });
 
         vm.startBroadcast();
-        // Intentionally expect this to revert if the hook enforcement is correct.
-        PoolSwapTest(swapTestAddress).swap(key, swapParams, settings, hookData);
+        // We do not want a reverted top-level tx (Foundry may not emit a broadcast artifact for it).
+        // Instead, we call the swap through a probe contract that catches the revert and emits an event.
+        NegativeSwapProbe probe = new NegativeSwapProbe(swapTestAddress, currency0, currency1);
+
+        // Fund the probe so the swap has sufficient balances/allowances in case the hook is buggy.
+        // For the expected enforcement revert path, funds should not be touched.
+        uint256 fundAmount = 10 ether;
+        IERC20Minimal(currency0).transfer(address(probe), fundAmount);
+        IERC20Minimal(currency1).transfer(address(probe), fundAmount);
+
+        probe.probeSwap(key, swapParams, settings, hookData);
         vm.stopBroadcast();
     }
 }
-

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { createPublicClient, http, type Hex } from 'viem';
+import { createPublicClient, decodeEventLog, http, parseAbiItem, type Hex } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { runMockV4Proof } from '@v4shm/uniswap-client';
 import type { ChallengePayload, SubmissionPayload, VerificationReport, WorkOrder } from '@v4shm/shared';
@@ -471,8 +471,9 @@ export async function runVerification(input: {
     proof.txIds = txIds;
   }
 
-  // Negative swap proof: broadcast a revert tx to demonstrate hook enforcement onchain.
-  // This is expected to revert; if it succeeds, the submission violates the HookSpec.
+  // Negative swap proof: demonstrate hook enforcement onchain.
+  // We avoid a reverted top-level tx (Foundry may not emit a broadcast artifact for it),
+  // and instead broadcast a successful tx that emits `NegativeSwapOutcome(reverted, reason)`.
   let negativeTx: string | null = null;
   try {
     const negative = runForge(
@@ -513,19 +514,52 @@ export async function runVerification(input: {
       hashes.push(...extractTxHashesFromForgeOutput(negative.output));
     }
 
-    negativeTx = hashes.at(-1) ?? null;
-
-    if (!negativeTx) {
-      throw new Error(`Unable to locate negative swap tx hash. forge ok=${negative.ok}`);
+    if (hashes.length === 0) {
+      throw new Error(`Unable to locate negative proof tx hash. forge ok=${negative.ok}`);
     }
 
+    const negativeSwapOutcomeEvent = parseAbiItem('event NegativeSwapOutcome(bool reverted, string reason)');
+    const expectedReason = templateType === 'SWAP_CAP_HOOK' ? 'CAP' : 'NOT_ALLOWLISTED';
     const publicClient = createPublicClient({
       chain: baseSepolia,
       transport: http(rpcUrl),
     });
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: negativeTx as Hex });
-    if (receipt.status !== 'reverted') {
-      throw new Error(`Negative swap tx did not revert (status=${receipt.status})`);
+
+    for (const candidate of [...hashes].reverse()) {
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: candidate as Hex });
+      if (receipt.status !== 'success') continue;
+
+      let outcome: { reverted: boolean; reason: string } | null = null;
+      for (const log of receipt.logs) {
+        try {
+          const decoded = decodeEventLog({
+            abi: [negativeSwapOutcomeEvent],
+            data: log.data,
+            topics: log.topics,
+          });
+          if (decoded.eventName !== 'NegativeSwapOutcome') continue;
+          const args: any = decoded.args;
+          outcome = { reverted: Boolean(args?.reverted), reason: String(args?.reason ?? '') };
+          break;
+        } catch {
+          // ignore non-matching logs
+        }
+      }
+
+      if (!outcome) continue;
+      negativeTx = candidate;
+
+      if (outcome.reverted !== true) {
+        throw new Error('Negative swap unexpectedly succeeded (hook enforcement failed)');
+      }
+      if (outcome.reason !== expectedReason) {
+        throw new Error(`Negative swap reverted with reason="${outcome.reason}" (expected "${expectedReason}")`);
+      }
+      break;
+    }
+
+    if (!negativeTx) {
+      throw new Error('Unable to find NegativeSwapOutcome event in negative proof tx receipts');
     }
 
     txIds.push(negativeTx);

@@ -124,7 +124,8 @@ function startProcess(
 
 const repoRoot = path.resolve(process.cwd());
 const dotEnv = parseDotEnv(path.join(repoRoot, '.env'));
-const env: NodeJS.ProcessEnv = { ...process.env, ...dotEnv };
+// Typical precedence: allow the caller to override `.env` via shell env vars.
+const env: NodeJS.ProcessEnv = { ...dotEnv, ...process.env };
 
 const pollMs = env.BOT_POLL_MS ? Number(env.BOT_POLL_MS) : 1000;
 if (!env.BOT_POLL_MS) env.BOT_POLL_MS = String(pollMs);
@@ -243,6 +244,7 @@ async function main() {
   if (setIfMissing('V4_AGENT_STEPS', '5')) demoDefaults.push('V4_AGENT_STEPS=5');
   if (setIfMissing('V4SHM_DEMO_ACTIONS', 'true')) demoDefaults.push('V4SHM_DEMO_ACTIONS=true');
   if (setIfMissing('V4SHM_QUIET_LOGS', 'true')) demoDefaults.push('V4SHM_QUIET_LOGS=true');
+  if (setIfMissing('YELLOW_FALLBACK_TO_MOCK', 'true')) demoDefaults.push('YELLOW_FALLBACK_TO_MOCK=true');
   if (setIfMissing('BOT_POLL_MS', '1000')) demoDefaults.push('BOT_POLL_MS=1000');
   if (setIfMissing('BOT_QUOTE_DELAY_MS_MIN', '5000')) demoDefaults.push('BOT_QUOTE_DELAY_MS_MIN=5000');
   if (setIfMissing('BOT_QUOTE_DELAY_MS_MAX', '15000')) demoDefaults.push('BOT_QUOTE_DELAY_MS_MAX=15000');

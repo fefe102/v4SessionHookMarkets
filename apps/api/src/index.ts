@@ -56,6 +56,17 @@ const server = Fastify({
 const db = createDb();
 const events = new EventBus(EVENT_LOG_PATH);
 
+// Serialize work-order mutations that touch Yellow app session state. Without this, concurrent
+// auto-sweeps and manual actions can submit stale app-state versions and fail transfers.
+const workOrderQueue = new Map<string, Promise<unknown>>();
+
+function queueWorkOrder<T>(workOrderId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = workOrderQueue.get(workOrderId) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  workOrderQueue.set(workOrderId, next.catch(() => {}));
+  return next;
+}
+
 await server.register(cors, { origin: true });
 await server.register(websocket);
 
@@ -629,70 +640,74 @@ server.post('/work-orders/:id/select', async (request, reply) => {
   const forceSelect = body?.force === true || force === 'true';
   const allowForceSelect = process.env.V4SHM_DEMO_ACTIONS === 'true';
 
-  const record = db.getWorkOrder(id);
-  if (!record) return reply.status(404).send({ error: 'Work order not found' });
-  const workOrder = normalizeWorkOrder(record.payload as WorkOrder);
+  const result = await queueWorkOrder(id, async () => {
+    const record = db.getWorkOrder(id);
+    if (!record) return { status: 404, body: { error: 'Work order not found' } };
+    const workOrder = normalizeWorkOrder(record.payload as WorkOrder);
 
-  if (!['BIDDING', 'FAILED', 'EXPIRED'].includes(workOrder.status)) {
-    return reply.status(400).send({ error: 'Work order cannot be selected in the current state' });
-  }
-
-  if (workOrder.status === 'BIDDING' && Date.now() < workOrder.bidding.biddingEndsAt) {
-    if (!forceSelect) {
-      return reply.status(400).send({ error: 'Bidding window still open. Use ?force=true to select early.' });
+    if (!['BIDDING', 'FAILED', 'EXPIRED'].includes(workOrder.status)) {
+      return { status: 400, body: { error: 'Work order cannot be selected in the current state' } };
     }
-    if (!allowForceSelect) {
-      return reply.status(400).send({ error: 'Force select disabled (set V4SHM_DEMO_ACTIONS=true)' });
+
+    if (workOrder.status === 'BIDDING' && Date.now() < workOrder.bidding.biddingEndsAt) {
+      if (!forceSelect) {
+        return { status: 400, body: { error: 'Bidding window still open. Use ?force=true to select early.' } };
+      }
+      if (!allowForceSelect) {
+        return { status: 400, body: { error: 'Force select disabled (set V4SHM_DEMO_ACTIONS=true)' } };
+      }
+      workOrder.bidding.biddingEndsAt = Date.now();
     }
-    workOrder.bidding.biddingEndsAt = Date.now();
-  }
 
-  const quotes = db.listQuotes(id).map((q) => q.payload as QuotePayload);
-  if (quotes.length === 0) {
-    return reply.status(400).send({ error: 'No quotes to select' });
-  }
+    const quotes = db.listQuotes(id).map((q) => q.payload as QuotePayload);
+    if (quotes.length === 0) {
+      return { status: 400, body: { error: 'No quotes to select' } };
+    }
 
-  try {
-    const session = await ensureYellowSession(workOrder, quotes);
-    emit(id, 'yellowSessionCreated', session);
-    await ensureQuoteRewardsPaid(workOrder, quotes);
-  } catch (error) {
-    server.log.error(error, 'failed to create Yellow session');
-    const details = process.env.V4SHM_DEMO_ACTIONS === 'true'
-      ? String((error as any)?.message ?? error)
-      : undefined;
-    return reply.status(500).send({ error: 'Failed to create Yellow session', details });
-  }
+    try {
+      const session = await ensureYellowSession(workOrder, quotes);
+      emit(id, 'yellowSessionCreated', session);
+      await ensureQuoteRewardsPaid(workOrder, quotes);
+    } catch (error) {
+      server.log.error(error, 'failed to create Yellow session');
+      const details = process.env.V4SHM_DEMO_ACTIONS === 'true'
+        ? String((error as any)?.message ?? error)
+        : undefined;
+      return { status: 500, body: { error: 'Failed to create Yellow session', details } };
+    }
 
-  const allowedSolvers = new Set(
-    (workOrder.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
-  );
-  const eligibleQuotes = quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()));
-  if (eligibleQuotes.length === 0) {
-    return reply.status(400).send({ error: 'No eligible quotes (session participant cap reached)' });
-  }
+    const allowedSolvers = new Set(
+      (workOrder.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
+    );
+    const eligibleQuotes = quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()));
+    if (eligibleQuotes.length === 0) {
+      return { status: 400, body: { error: 'No eligible quotes (session participant cap reached)' } };
+    }
 
-  const attempted = workOrder.selection.attemptedQuoteIds ?? [];
-  const availableQuotes = eligibleQuotes.filter((quote) => !attempted.includes(quote.id));
-  const selectedQuote = body?.quoteId
-    ? eligibleQuotes.find((quote) => quote.id === body.quoteId)
-    : selectBestQuote(availableQuotes.length > 0 ? availableQuotes : eligibleQuotes);
+    const attempted = workOrder.selection.attemptedQuoteIds ?? [];
+    const availableQuotes = eligibleQuotes.filter((quote) => !attempted.includes(quote.id));
+    const selectedQuote = body?.quoteId
+      ? eligibleQuotes.find((quote) => quote.id === body.quoteId)
+      : selectBestQuote(availableQuotes.length > 0 ? availableQuotes : eligibleQuotes);
 
-  if (!selectedQuote) {
-    return reply.status(404).send({ error: 'Quote not found' });
-  }
+    if (!selectedQuote) {
+      return { status: 404, body: { error: 'Quote not found' } };
+    }
 
-  applySelection(workOrder, selectedQuote);
+    applySelection(workOrder, selectedQuote);
 
-  const winStats = getSolverStats(selectedQuote.solverAddress);
-  winStats.quotesWon += 1;
-  saveSolverStats(winStats);
+    const winStats = getSolverStats(selectedQuote.solverAddress);
+    winStats.quotesWon += 1;
+    saveSolverStats(winStats);
 
-  persistWorkOrder(workOrder);
+    persistWorkOrder(workOrder);
 
-  emit(id, 'solverSelected', { workOrderId: id, quote: selectedQuote });
+    emit(id, 'solverSelected', { workOrderId: id, quote: selectedQuote });
 
-  return reply.status(200).send(workOrder);
+    return { status: 200, body: workOrder };
+  });
+
+  return reply.status(result.status).send(result.body);
 });
 
 server.post('/work-orders/:id/submit', async (request, reply) => {
@@ -890,27 +905,31 @@ server.post('/work-orders/:id/submit', async (request, reply) => {
 server.post('/work-orders/:id/end-session', async (request, reply) => {
   const { id } = request.params as { id: string };
   const { force } = (request.query as { force?: string }) ?? {};
-  const record = db.getWorkOrder(id);
-  if (!record) return reply.status(404).send({ error: 'Work order not found' });
-  const workOrder = normalizeWorkOrder(record.payload as WorkOrder);
+  const result = await queueWorkOrder(id, async () => {
+    const record = db.getWorkOrder(id);
+    if (!record) return { status: 404, body: { error: 'Work order not found' } };
+    const workOrder = normalizeWorkOrder(record.payload as WorkOrder);
 
-  if (workOrder.status !== 'PASSED_PENDING_CHALLENGE') {
-    return reply.status(400).send({ error: 'Work order is not ready to settle' });
-  }
-  if (workOrder.challenge.status === 'PATCH_WINDOW') {
-    return reply.status(400).send({ error: 'Patch window open; cannot settle yet' });
-  }
+    if (workOrder.status !== 'PASSED_PENDING_CHALLENGE') {
+      return { status: 400, body: { error: 'Work order is not ready to settle' } };
+    }
+    if (workOrder.challenge.status === 'PATCH_WINDOW') {
+      return { status: 400, body: { error: 'Patch window open; cannot settle yet' } };
+    }
 
-  if (workOrder.deadlines.challengeEndsAt && Date.now() < workOrder.deadlines.challengeEndsAt && force !== 'true') {
-    return reply.status(400).send({ error: 'Challenge window still open. Use ?force=true to settle early.' });
-  }
+    if (workOrder.deadlines.challengeEndsAt && Date.now() < workOrder.deadlines.challengeEndsAt && force !== 'true') {
+      return { status: 400, body: { error: 'Challenge window still open. Use ?force=true to settle early.' } };
+    }
 
-  const result = await settleWorkOrder(workOrder);
-  if (!result) {
-    return reply.status(400).send({ error: 'Unable to settle work order' });
-  }
+    const settlement = await settleWorkOrder(workOrder);
+    if (!settlement) {
+      return { status: 400, body: { error: 'Unable to settle work order' } };
+    }
 
-  return reply.status(200).send({ workOrder, settlement: result });
+    return { status: 200, body: { workOrder, settlement } };
+  });
+
+  return reply.status(result.status).send(result.body);
 });
 
 server.get('/work-orders/:id/payments', async (request, reply) => {
@@ -1136,44 +1155,55 @@ async function sweepWorkOrders() {
 
   for (const workOrder of workOrders) {
     if (workOrder.status === 'BIDDING' && now >= workOrder.bidding.biddingEndsAt) {
-      const quotes = db.listQuotes(workOrder.id).map((q) => q.payload as QuotePayload);
-      if (quotes.length === 0) {
-        workOrder.status = 'EXPIRED';
-        persistWorkOrder(workOrder);
-        emit(workOrder.id, 'workOrderExpired', { reason: 'no_quotes' });
-        continue;
-      }
+      await queueWorkOrder(workOrder.id, async () => {
+        const record = db.getWorkOrder(workOrder.id);
+        if (!record) return;
+        const current = normalizeWorkOrder(record.payload as WorkOrder);
 
-      try {
-        const session = await ensureYellowSession(workOrder, quotes);
-        emit(workOrder.id, 'yellowSessionCreated', session);
-        await ensureQuoteRewardsPaid(workOrder, quotes);
-      } catch (error) {
-        server.log.error(error, 'failed to create Yellow session (auto)');
-        continue;
-      }
+        const now = Date.now();
+        if (current.status !== 'BIDDING') return;
+        if (now < current.bidding.biddingEndsAt) return;
 
-      const allowedSolvers = new Set(
-        (workOrder.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
-      );
-      const eligibleQuotes = quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()));
-      if (eligibleQuotes.length === 0) {
-        workOrder.status = 'EXPIRED';
-        persistWorkOrder(workOrder);
-        emit(workOrder.id, 'workOrderExpired', { reason: 'session_participant_cap' });
-        continue;
-      }
+        const quotes = db.listQuotes(current.id).map((q) => q.payload as QuotePayload);
+        if (quotes.length === 0) {
+          current.status = 'EXPIRED';
+          persistWorkOrder(current);
+          emit(current.id, 'workOrderExpired', { reason: 'no_quotes' });
+          return;
+        }
 
-      const attempted = workOrder.selection.attemptedQuoteIds ?? [];
-      const selectedQuote = selectNextQuote(eligibleQuotes, attempted) ?? selectBestQuote(eligibleQuotes);
-      if (!selectedQuote) continue;
-      applySelection(workOrder, selectedQuote);
+        try {
+          const session = await ensureYellowSession(current, quotes);
+          emit(current.id, 'yellowSessionCreated', session);
+          await ensureQuoteRewardsPaid(current, quotes);
+        } catch (error) {
+          server.log.error(error, 'failed to ensure Yellow session/quote rewards (auto)');
+          return;
+        }
 
-      const winStats = getSolverStats(selectedQuote.solverAddress);
-      winStats.quotesWon += 1;
-      saveSolverStats(winStats);
-      persistWorkOrder(workOrder);
-      emit(workOrder.id, 'solverAutoSelected', { quote: selectedQuote });
+        const allowedSolvers = new Set(
+          (current.yellow.participants ?? []).slice(1).map((participant) => participant.toLowerCase())
+        );
+        const eligibleQuotes = quotes.filter((quote) => allowedSolvers.has(quote.solverAddress.toLowerCase()));
+        if (eligibleQuotes.length === 0) {
+          current.status = 'EXPIRED';
+          persistWorkOrder(current);
+          emit(current.id, 'workOrderExpired', { reason: 'session_participant_cap' });
+          return;
+        }
+
+        const attempted = current.selection.attemptedQuoteIds ?? [];
+        const selectedQuote = selectNextQuote(eligibleQuotes, attempted) ?? selectBestQuote(eligibleQuotes);
+        if (!selectedQuote) return;
+        applySelection(current, selectedQuote);
+
+        const winStats = getSolverStats(selectedQuote.solverAddress);
+        winStats.quotesWon += 1;
+        saveSolverStats(winStats);
+        persistWorkOrder(current);
+        emit(current.id, 'solverAutoSelected', { quote: selectedQuote });
+      });
+      continue;
     }
 
     if (workOrder.status === 'SELECTED' && workOrder.deadlines.deliveryEndsAt && now > workOrder.deadlines.deliveryEndsAt) {
@@ -1183,11 +1213,29 @@ async function sweepWorkOrders() {
     }
 
     if (workOrder.status === 'PASSED_PENDING_CHALLENGE' && workOrder.deadlines.challengeEndsAt && now > workOrder.deadlines.challengeEndsAt) {
-      await settleWorkOrder(workOrder);
+      await queueWorkOrder(workOrder.id, async () => {
+        const record = db.getWorkOrder(workOrder.id);
+        if (!record) return;
+        const current = normalizeWorkOrder(record.payload as WorkOrder);
+        const now = Date.now();
+        if (current.status !== 'PASSED_PENDING_CHALLENGE') return;
+        if (!current.deadlines.challengeEndsAt || now <= current.deadlines.challengeEndsAt) return;
+        await settleWorkOrder(current);
+      });
+      continue;
     }
 
     if (workOrder.status === 'CHALLENGED' && workOrder.deadlines.patchEndsAt && now > workOrder.deadlines.patchEndsAt) {
-      await finalizeChallengeFailure(workOrder);
+      await queueWorkOrder(workOrder.id, async () => {
+        const record = db.getWorkOrder(workOrder.id);
+        if (!record) return;
+        const current = normalizeWorkOrder(record.payload as WorkOrder);
+        const now = Date.now();
+        if (current.status !== 'CHALLENGED') return;
+        if (!current.deadlines.patchEndsAt || now <= current.deadlines.patchEndsAt) return;
+        await finalizeChallengeFailure(current);
+      });
+      continue;
     }
   }
 }

@@ -48,11 +48,18 @@ async function checkListen(port: number, host: string): Promise<ListenCheck> {
 }
 
 async function isPortAvailable(port: number): Promise<boolean> {
-  // Some dev environments allow binding to localhost but not 0.0.0.0/::.
-  const [v4, v6] = await Promise.all([checkListen(port, '127.0.0.1'), checkListen(port, '::1')]);
+  // Most dev servers bind to all interfaces (0.0.0.0 / ::). If a port is occupied on any non-loopback
+  // interface, binding to 0.0.0.0 / :: will fail (even if 127.0.0.1 is free), so check these first.
+  const [allV4, allV6] = await Promise.all([checkListen(port, '0.0.0.0'), checkListen(port, '::')]);
 
-  if (v4 === 'in_use' || v6 === 'in_use') return false;
-  return v4 === 'available' || v6 === 'available';
+  if (allV4 === 'in_use' || allV6 === 'in_use') return false;
+  if (allV4 === 'available' || allV6 === 'available') return true;
+
+  // Some dev environments allow binding to localhost but not 0.0.0.0/:: (unsupported), so fall back.
+  const [loopV4, loopV6] = await Promise.all([checkListen(port, '127.0.0.1'), checkListen(port, '::1')]);
+
+  if (loopV4 === 'in_use' || loopV6 === 'in_use') return false;
+  return loopV4 === 'available' || loopV6 === 'available';
 }
 
 async function pickPort(

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { fetchJson } from '../../../lib/api';
 import LiveRefresher from './LiveRefresher';
+import AutoPickQuote from './AutoPickQuote';
 import EndSessionButton from '../../components/EndSessionButton';
 import SelectBestQuoteButton from '../../components/SelectBestQuoteButton';
 import SelectQuoteButton from '../../components/SelectQuoteButton';
@@ -146,6 +147,17 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
       <section className="section grid two">
         <div className="card">
           <h3>Quotes</h3>
+          <AutoPickQuote
+            workOrderId={workOrder.id}
+            workOrderStatus={workOrder.status}
+            selectedQuoteId={workOrder.selection.selectedQuoteId}
+            quotes={quotes.map((quote) => ({
+              id: quote.id,
+              price: quote.price,
+              etaMinutes: quote.etaMinutes,
+              createdAt: quote.createdAt,
+            }))}
+          />
           {quotes.length === 0 ? <p>No quotes yet.</p> : (
             <div className="grid">
               {quotes.map((quote) => {
@@ -153,9 +165,11 @@ export default async function WorkOrderPage({ params }: { params: { id: string }
                 const score = Number(reputationMap.get(key)?.score ?? 0);
                 const rank = solverRank.get(key) ?? rankedSolvers.length - 1;
                 const tier = reputationTierByRank(rank, rankedSolvers.length);
+                const isSelected = quote.id === workOrder.selection.selectedQuoteId;
+                const className = isSelected ? 'card quote-selected quote-selected-blink' : 'card';
 
                 return (
-                  <div key={quote.id} className="card">
+                  <div key={quote.id} className={className}>
                     <p>{quote.solverAddress}</p>
                     <p>
                       <strong>{formatQuotePrice(quote.price, workOrder.bounty.currency)}</strong>

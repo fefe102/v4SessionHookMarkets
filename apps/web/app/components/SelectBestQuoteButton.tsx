@@ -20,6 +20,11 @@ export default function SelectBestQuoteButton(
 
   async function handleClick() {
     if (isLoading) return;
+    try {
+      window.dispatchEvent(new CustomEvent('v4shm:manual-select', { detail: { workOrderId } }));
+    } catch {
+      // ignore
+    }
     setIsLoading(true);
     setStatus('Selecting...');
 

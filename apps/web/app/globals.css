@@ -80,6 +80,30 @@ p {
   margin-top: 0;
 }
 
+.quote-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(22, 93, 255, 0.16), 0 6px 20px rgba(22, 93, 255, 0.08);
+}
+
+.quote-selected-blink {
+  animation: quote-blink-once 850ms ease-in-out 1;
+}
+
+@keyframes quote-blink-once {
+  0% {
+    background: var(--card);
+    box-shadow: 0 0 0 2px rgba(22, 93, 255, 0.16), 0 6px 20px rgba(22, 93, 255, 0.08);
+  }
+  35% {
+    background: #eef1ff;
+    box-shadow: 0 0 0 7px rgba(22, 93, 255, 0.22), 0 10px 26px rgba(22, 93, 255, 0.12);
+  }
+  100% {
+    background: var(--card);
+    box-shadow: 0 0 0 2px rgba(22, 93, 255, 0.16), 0 6px 20px rgba(22, 93, 255, 0.08);
+  }
+}
+
 .button {
   appearance: none;
   border: none;
